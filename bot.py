@@ -16,9 +16,8 @@ from discord.ui import Button, View, Select
 from fuzzywuzzy import process
 import random
 from GameSystem.YachtDiceGame import YachtDiceGame
-from datetime import datetime  # 날짜/시간 기록을 위해 추가
+from datetime import datetime
 
-# 봇 토큰을 넣은 파일 작성후 주소에 대입.
 load_dotenv(dotenv_path=r'C:\Users\User\PycharmProjects\Tendo_Aris\TOKEN.env')
 token = os.getenv('DISCORD_BOT_TOKEN')
 
@@ -29,7 +28,7 @@ intents.message_content = True
 class FuzzyBot(commands.Bot):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.remove_command('help')  # 기본 help 명령어 제거
+        self.remove_command('help')
 
     def get_commands(self):
         return list(self.all_commands.values())
@@ -44,7 +43,6 @@ class FuzzyBot(commands.Bot):
             if matches:
                 ctx.command = self.all_commands.get(matches[0][0])
             else:
-                # 비슷한 명령어가 없을 경우
                 similar_commands = process.extractBests(command_name, [cmd.name for cmd in commands], score_cutoff=60)
                 if similar_commands:
                     suggestions = ', '.join([match[0] for match in similar_commands])
@@ -56,10 +54,8 @@ class FuzzyBot(commands.Bot):
         print(f'아리스가 준비 완료했어요! {self.user}로 로그인했답니다~')
 
 
-# 봇 객체 생성
 bot = FuzzyBot(command_prefix='!', intents=intents)
 
-# 유튜브 음원 다운로드 설정 개선 (403 오류 방지)
 ytdl_format_options = {
     'format': 'bestaudio/best',
     'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
@@ -72,7 +68,6 @@ ytdl_format_options = {
     'no_warnings': True,
     'default_search': 'auto',
     'source_address': '0.0.0.0',
-    # 403 오류 방지를 위한 추가 옵션들
     'cookiefile': None,
     'usenetrc': False,
     'username': None,
@@ -87,32 +82,27 @@ ytdl_format_options = {
     'retries': 10,
     'retry_sleep': 3,
     'fragment_retries': 10,
-    # 더 현실적인 User-Agent와 헤더
     'http_headers': {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-us,en;q=0.5',
         'Sec-Fetch-Mode': 'navigate',
     },
-    # YouTube 특정 설정
     'age_limit': None,
     'extract_flat': False,
     'geo_bypass': True,
     'geo_bypass_country': 'US',
-    # 추가적인 안정성 옵션
     'writesubtitles': False,
     'writeautomaticsub': False,
     'allsubtitles': False,
     'ignoreerrors': True,
 }
 
-# 음성 추출 기능 개선
 ffmpeg_options = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -reconnect_at_eof 1 -timeout 30000000',
     'options': '-vn -timeout 30000000 -user_agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"'
 }
 
-# 설치된 FFmpeg 실행 파일의 경로 (적절히 변경 필요)
 ffmpeg_path = r'C:\Users\User\ffmpeg-2024-10-21-git-baa23e40c1-full_build\bin\ffmpeg.exe'
 
 
@@ -123,7 +113,6 @@ def create_ytdl_instance(custom_options=None):
     if custom_options:
         options.update(custom_options)
     
-    # 랜덤 User-Agent 선택 (탐지 방지)
     user_agents = [
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
@@ -152,34 +141,33 @@ class MusicPlayer:
         self.loop = False
         self.queue_loop = False
         self.current_message = None
-        self.button_message = None  # 버튼 메시지를 저장할 변수 추가
+        self.button_message = None
 
-        self.idle_timeout = 300  # 5분 (300초)
-        self.last_activity = asyncio.Event()  # 마지막 활동을 기록할 이벤트
-        self.inactive_time = 0  # 비활동 시간을 기록할 변수 추가
+        self.idle_timeout = 300
+        self.last_activity = asyncio.Event()
+        self.inactive_time = 0
 
-        self.random_play = False  # 랜덤 재생 모드 변수 초기화
+        self.random_play = False
 
         self.bot.loop.create_task(self.player_loop())
-        self.bot.loop.create_task(self.register_voice_state_listener())  # 음성 상태 업데이트 리스너 등록
-        self.bot.loop.create_task(self.check_idle_timeout())  # 아이들 타임아웃 체크 추가
+        self.bot.loop.create_task(self.register_voice_state_listener())
+        self.bot.loop.create_task(self.check_idle_timeout())
 
-    # is_playing 프로퍼티 추가
     @property
     def is_playing(self):
         return self.guild.voice_client and self.guild.voice_client.is_playing()
 
     async def check_idle_timeout(self):
         while True:
-            await asyncio.sleep(1)  # 1초마다 체크
+            await asyncio.sleep(1)
             if not self.last_activity.is_set():
-                self.inactive_time += 1  # 비활동 시간 증가
-                print(f"비활동 시간: {self.inactive_time}초")  # 비활동 시간 출력
+                self.inactive_time += 1
+                print(f"비활동 시간: {self.inactive_time}초")
                 if self.inactive_time >= self.idle_timeout:
-                    await self.stop()  # 활동이 없으면 음악 정지
-                    self.restart_program()  # 프로그램 재시작
+                    await self.stop()
+                    self.restart_program()
             else:
-                self.inactive_time = 0  # 활동이 있으면 비활동 시간 초기화
+                self.inactive_time = 0
 
     def restart_program(self):
         """현재 프로그램을 재시작합니다."""
@@ -188,90 +176,77 @@ class MusicPlayer:
     async def register_voice_state_listener(self):
         @self.bot.listen('on_voice_state_update')
         async def on_voice_state_update(member, before, after):
-            self.last_activity.set()  # 사용자가 음성 채널에 있을 때 활동 기록
-            if before.channel is not None and after.channel is None:  # 사용자가 음성 채널에서 나갔을 때
-                if member == self.guild.me:  # 봇이 나갈 경우
+            self.last_activity.set()
+            if before.channel is not None and after.channel is None:
+                if member == self.guild.me:
                     return
 
-                # 음성 채널에 남아 있는 사용자 수 확인
-                if len(before.channel.members) > 1:  # 다른 사용자가 남아 있는 경우
+                if len(before.channel.members) > 1:
                     return
 
-                await self.guild.voice_client.pause()  # 음원 일시 정지
-                await asyncio.sleep(10)  # 10초 대기
-                await self.stop()  # 음성 채널에서 나가기
-                # 개인 메시지 전송 및 삭제
-                message = await member.send("아리스가 음성 채널에서 나가요. 다음에 또 불러주세요!")  # 개인 메시지 전송
-                await asyncio.sleep(3)  # 3초 대기
-                await message.delete()  # 메시지 삭제
+                await self.guild.voice_client.pause()
+                await asyncio.sleep(10)
+                await self.stop()
+                message = await member.send("아리스가 음성 채널에서 나가요. 다음에 또 불러주세요!")
+                await asyncio.sleep(3)
+                await message.delete()
 
-            # 사용자가 음성 채널에 들어왔을 때
             if after.channel is not None and member != self.guild.me:
-                if len(after.channel.members) == 1:  # 사용자가 혼자 있을 경우
-                    await self.guild.voice_client.disconnect()  # 봇이 음성 채널에서 나가기
-                    await member.send("아리스가 음성 채널에서 나가요. 다음에 또 불러주세요!")  # 개인 메시지 전송
+                if len(after.channel.members) == 1:
+                    await self.guild.voice_client.disconnect()
+                    await member.send("아리스가 음성 채널에서 나가요. 다음에 또 불러주세요!")
 
     async def player_loop(self):
         await self.bot.wait_until_ready()
 
         while not self.bot.is_closed():
             self.next.clear()
-            self.last_activity.set()  # 활동이 있을 때마다 이벤트 설정
+            self.last_activity.set()
 
-            # 이전 메시지 삭제 (개선된 오류 처리)
             await self.delete_messages()
 
-            # 단일 곡 반복 모드
             if self.loop and self.current:
                 source = self.current
-            # 전체 반복 모드
             elif self.queue_loop and self.queue.empty() and self.current:
                 source = self.current
                 await self.queue.put(source)
             else:
                 try:
-                    async with timeout(300):  # 5분 동안 대기
+                    async with timeout(300):
                         source = await self.queue.get()
                 except asyncio.TimeoutError:
                     await self.delete_messages()
-                    return await self.stop()  # 타임아웃 시 종료
+                    return await self.stop()
 
-            # URL 정보 추출 시 개선된 재시도 로직 (403 오류 대응)
             if not isinstance(source, dict):
                 max_retries = 5
                 base_delay = 2
                 for attempt in range(max_retries):
                     try:
-                        # 새로운 YoutubeDL 인스턴스 생성 (각 시도마다, 랜덤 User-Agent 포함)
                         ydl = create_ytdl_instance()
                         source = await self.bot.loop.run_in_executor(None, lambda: ydl.extract_info(source, download=False))
-                        break  # 성공하면 루프 종료
+                        break
                     except Exception as e:
                         error_msg = str(e).lower()
                         
-                        # 403 오류 특별 처리
                         if '403' in error_msg or 'forbidden' in error_msg:
-                            # 지수적 백오프 적용
                             delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
                             print(f"403 오류 감지 - 시도 {attempt + 1}/{max_retries}, {delay:.1f}초 대기 후 재시도")
                             await asyncio.sleep(delay)
                         elif 'private' in error_msg or 'unavailable' in error_msg:
-                            # 비공개/삭제된 동영상은 즉시 포기
                             await self.channel.send(f'앗, 이 영상은 비공개이거나 삭제되었어요: {str(e)[:100]}...', delete_after=10)
                             break
                         else:
-                            # 기타 오류는 짧은 대기
                             await asyncio.sleep(1)
                         
-                        if attempt == max_retries - 1:  # 마지막 시도
+                        if attempt == max_retries - 1:
                             await self.channel.send(f'어머나, {max_retries}번 시도했지만 노래를 불러올 수 없어요: {str(e)[:100]}...', delete_after=10)
-                            continue  # 다음 곡으로
+                            continue
                         else:
                             print(f"시도 {attempt + 1}/{max_retries} 실패: {str(e)}")
 
             self.current = source
             
-            # 히스토리에 노래 추가
             try:
                 await self.cog.add_to_history(self.guild.id, source)
             except Exception as e:
@@ -280,19 +255,16 @@ class MusicPlayer:
             try:
                 self.current_message = await self.channel.send(
                     f'선생님, 지금 재생 중인 노래예요: {source["title"]}\n주소: {source.get("webpage_url", "알 수 없음")}')
-                self.button_message, view = await self.create_player_message()  # 버튼 메시지와 뷰 저장
+                self.button_message, view = await self.create_player_message()
 
-                # 버튼 색상 유지
                 await self.update_button_styles(view)
             except Exception as e:
                 print(f"메시지 전송 중 오류: {e}")
 
             try:
-                # 이미 재생 중인 경우 중지
                 if self.guild.voice_client.is_playing():
                     self.guild.voice_client.stop()
 
-                # 새로운 곡 재생 (재시도 로직 추가)
                 max_play_retries = 2
                 for play_attempt in range(max_play_retries):
                     try:
@@ -304,16 +276,15 @@ class MusicPlayer:
                         )
                         self.guild.voice_client.source = discord.PCMVolumeTransformer(self.guild.voice_client.source)
                         self.guild.voice_client.source.volume = self.volume
-                        break  # 성공하면 루프 종료
+                        break
                     except Exception as play_error:
-                        if play_attempt == max_play_retries - 1:  # 마지막 시도
+                        if play_attempt == max_play_retries - 1:
                             await self.channel.send(f"앗, 재생 중에 문제가 생겼어요. 다음 곡으로 넘어갈게요: {str(play_error)[:100]}...", delete_after=10)
-                            self.next.set()  # 다음 곡으로 강제 이동
+                            self.next.set()
                         else:
                             print(f"재생 시도 {play_attempt + 1}/{max_play_retries} 실패: {str(play_error)}")
-                            await asyncio.sleep(3)  # 3초 대기 후 재시도
+                            await asyncio.sleep(3)
                             
-                            # URL 다시 가져오기 (403 오류 방지 개선)
                             try:
                                 ydl = create_ytdl_instance()
                                 source = await self.bot.loop.run_in_executor(None, lambda: ydl.extract_info(source.get('webpage_url', source.get('url')), download=False))
@@ -324,15 +295,13 @@ class MusicPlayer:
             except Exception as e:
                 await self.channel.send(f"재생 시스템에 문제가 있어요. 다음 곡으로 넘어갈게요: {str(e)[:100]}...", delete_after=10)
                 print(f"상세 오류 정보: {e.__class__.__name__}: {str(e)}")
-                self.next.set()  # 다음 곡으로 강제 이동
+                self.next.set()
 
             await self.next.wait()
 
-            # 전체 반복 모드일 때 현재 곡을 대기열 끝에 추가
             if self.queue_loop and not self.loop:
                 await self.queue.put(self.current)
 
-            # 다음 곡이 없고 반복 모드가 아닐 때 종료
             if self.queue.empty() and not (self.loop or self.queue_loop):
                 await self.delete_messages()
                 await self.stop()
@@ -345,7 +314,6 @@ class MusicPlayer:
             if self.current_message:
                 await self.current_message.delete()
         except (discord.NotFound, discord.HTTPException, discord.Forbidden):
-            # 메시지가 이미 삭제되었거나 권한이 없는 경우 무시
             pass
         finally:
             self.current_message = None
@@ -354,7 +322,6 @@ class MusicPlayer:
             if self.button_message:
                 await self.button_message.delete()
         except (discord.NotFound, discord.HTTPException, discord.Forbidden):
-            # 메시지가 이미 삭제되었거나 권한이 없는 경우 무시
             pass
         finally:
             self.button_message = None
@@ -369,7 +336,7 @@ class MusicPlayer:
         await self.delete_messages()
 
     async def create_player_message(self):
-        view = View(timeout=None)  # 타임아웃을 None으로 설정하여 버튼이 항상 유효하도록 함
+        view = View(timeout=None)
 
         play_pause = Button(label="재생/일시정지", style=discord.ButtonStyle.primary)
         skip = Button(label="다음 노래로!", style=discord.ButtonStyle.secondary)
@@ -377,7 +344,7 @@ class MusicPlayer:
         loop = Button(label="이 노래 계속 들을래요", style=discord.ButtonStyle.danger)
         queue_loop = Button(label="전체 반복", style=discord.ButtonStyle.danger)
 
-        random_play = Button(label="랜덤 재생", style=discord.ButtonStyle.secondary)  # 랜덤 재생 버튼 추가
+        random_play = Button(label="랜덤 재생", style=discord.ButtonStyle.secondary)
 
         volume_up = Button(label="더 크게!", style=discord.ButtonStyle.secondary)
         volume_down = Button(label="조금만 작게", style=discord.ButtonStyle.secondary)
@@ -397,35 +364,34 @@ class MusicPlayer:
             await interaction.response.send_message("알겠어요, 선생님! 다음 노래로 넘어갈게요!", ephemeral=True, delete_after=3)
 
         async def loop_callback(interaction):
-            if self.random_play:  # 랜덤 재생이 켜져 있을 경우
+            if self.random_play:
                 await interaction.response.send_message("랜덤 재생이 활성화되어 있어요. 한 곡 반복을 켜기 전에 랜덤 재생을 꺼야 해요.", ephemeral=True)
                 return
 
             self.loop = not self.loop
-            loop.style = discord.ButtonStyle.success if self.loop else discord.ButtonStyle.danger  # 버튼 색상 변경
-            await interaction.response.edit_message(view=view)  # 메시지 업데이트
+            loop.style = discord.ButtonStyle.success if self.loop else discord.ButtonStyle.danger
+            await interaction.response.edit_message(view=view)
 
         async def queue_loop_callback(interaction):
             self.queue_loop = not self.queue_loop
-            queue_loop.style = discord.ButtonStyle.success if self.queue_loop else discord.ButtonStyle.danger  # 버튼 색상 변경
-            await interaction.response.edit_message(view=view)  # 메시지 업데이트
+            queue_loop.style = discord.ButtonStyle.success if self.queue_loop else discord.ButtonStyle.danger
+            await interaction.response.edit_message(view=view)
 
         async def random_play_callback(interaction):
-            if self.loop:  # 한 곡 반복이 켜져 있을 경우
+            if self.loop:
                 await interaction.response.send_message("한 곡 반복이 활성화되어 있어요. 랜덤 재생을 켜기 전에 한 곡 반복을 꺼야 해요.",
                                                         ephemeral=True)
                 return
 
-            self.random_play = not self.random_play  # 랜덤 재생 모드 토글
+            self.random_play = not self.random_play
             status = "켜졌어요" if self.random_play else "꺼졌어요"
             await interaction.response.send_message(f"랜덤 재생 모드가 {status}!", ephemeral=True)
 
-            # 버튼 색상 업데이트
             random_play.style = discord.ButtonStyle.success if self.random_play else discord.ButtonStyle.secondary
-            await interaction.message.edit(view=view)  # 버튼 상태 업데이트
+            await interaction.message.edit(view=view)
 
-            if self.random_play:  # 랜덤 재생이 활성화되면 다음 곡부터 랜덤하게 재생
-                await self.play_next()  # 다음 곡 재생 호출
+            if self.random_play:
+                await self.play_next()
 
         async def volume_up_callback(interaction):
             if self.volume < 1.0:
@@ -458,7 +424,7 @@ class MusicPlayer:
         skip.callback = skip_callback
         loop.callback = loop_callback
         queue_loop.callback = queue_loop_callback
-        random_play.callback = random_play_callback  # 버튼 클릭 시 호출될 함수 설정
+        random_play.callback = random_play_callback
         volume_up.callback = volume_up_callback
         volume_down.callback = volume_down_callback
         stop_button.callback = stop_callback
@@ -484,10 +450,10 @@ class MusicPlayer:
                         item.style = discord.ButtonStyle.success if self.loop else discord.ButtonStyle.danger
                     elif item.label == "전체 반복":
                         item.style = discord.ButtonStyle.success if self.queue_loop else discord.ButtonStyle.danger
-                    elif item.label == "랜덤 재생":  # 랜덤 재생 버튼 색상 업데이트 추가
+                    elif item.label == "랜덤 재생":
                         item.style = discord.ButtonStyle.success if self.random_play else discord.ButtonStyle.secondary
             if self.button_message:
-                await self.button_message.edit(view=view)  # 버튼 상태 업데이트
+                await self.button_message.edit(view=view)
         except (discord.NotFound, discord.HTTPException, discord.Forbidden):
             # 메시지가 삭제되었거나 권한이 없는 경우 무시
             pass
@@ -499,36 +465,32 @@ class MusicPlayer:
         if self.queue.empty():
             return
 
-        if self.guild.voice_client is None:  # 음성 클라이언트가 None인지 확인
-            if self.channel.guild.me.voice and self.channel.guild.me.voice.channel:  # 봇이 음성 채널에 있는지 확인
+        if self.guild.voice_client is None:
+            if self.channel.guild.me.voice and self.channel.guild.me.voice.channel:
                 voice_channel = self.channel.guild.me.voice.channel
                 await voice_channel.connect()
-            elif self.channel.author and self.channel.author.voice:  # 메시지 작성자가 음성 채널에 있는지 확인
+            elif self.channel.author and self.channel.author.voice:
                 await self.channel.author.voice.channel.connect()
             else:
-                return  # 음성 채널에 연결할 수 없으면 종료
+                return
 
-        # 반복 모드나 랜덤 재생 모드에 따라 곡 선택
-        if self.loop and self.current:  # 한 곡 반복 모드
+        if self.loop and self.current:
             source = self.current
-        elif self.random_play and self.queue._queue:  # 랜덤 재생 모드
+        elif self.random_play and self.queue._queue:
             queue_list = list(self.queue._queue)
             index = random.randrange(len(queue_list))
             source = queue_list[index]
-            # 큐에서 해당 항목 제거
             for _ in range(self.queue.qsize()):
                 item = await self.queue.get()
                 if item == source:
                     break
                 await self.queue.put(item)
-        else:  # 일반 재생 모드
+        else:
             source = await self.queue.get()
 
-        # 현재 곡 반복 모드가 활성화된 경우, 현재 곡을 대기열에 추가
         if self.loop and not self.random_play:
             await self.queue.put(source)
 
-        # 곡 재생 시작
         if not isinstance(source, dict):
             try:
                 ydl = create_ytdl_instance()
@@ -537,7 +499,6 @@ class MusicPlayer:
                 await self.channel.send(f'어머나, 오류가 발생했어요: {str(e)}')
                 return
 
-        # 현재 메시지와 버튼 메시지 업데이트
         if self.current_message:
             await self.current_message.delete()
         if self.button_message:
@@ -548,11 +509,9 @@ class MusicPlayer:
             f'선생님, 지금 재생 중인 노래예요: {source["title"]}\n주소: {source.get("webpage_url", "알 수 없음")}')
         self.button_message, view = await self.create_player_message()
 
-        # 버튼 색상 유지
         await self.update_button_styles(view)
 
         try:
-            # 노래 재생
             self.guild.voice_client.play(
                 discord.FFmpegPCMAudio(source['url'], executable=ffmpeg_path,
                                        before_options=ffmpeg_options['before_options'],
@@ -565,9 +524,8 @@ class MusicPlayer:
             await self.channel.send(f"앗, 재생 중에 문제가 생겼어요: {str(e)}", delete_after=10)
             print(f"상세 오류 정보: {e.__class__.__name__}: {str(e)}")
             
-            # 랜덤 재생이 활성화된 경우, 다음 곡을 계속해서 재생
             if self.random_play:
-                await asyncio.sleep(1)  # 잠시 대기 후 다음 곡 재생
+                await asyncio.sleep(1)
 
 
 class Music(commands.Cog):
@@ -575,7 +533,7 @@ class Music(commands.Cog):
         self.bot = bot
         self.players = {}
         self.playlists = self.load_playlists()
-        self.history = self.load_history()  # 히스토리 로드 추가
+        self.history = self.load_history()
 
     def load_history(self):
         """히스토리를 파일에서 로드합니다."""
@@ -606,7 +564,6 @@ class Music(commands.Cog):
             if guild_id_str not in self.history:
                 self.history[guild_id_str] = []
             
-            # 히스토리 항목 생성
             history_item = {
                 'title': source.get('title', '알 수 없는 제목'),
                 'url': source.get('webpage_url', source.get('url', '')),
@@ -614,14 +571,11 @@ class Music(commands.Cog):
                 'played_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
             
-            # 히스토리에 추가 (최신 항목이 맨 앞에 오도록)
             self.history[guild_id_str].insert(0, history_item)
             
-            # 히스토리 크기 제한 (최대 100곡)
             if len(self.history[guild_id_str]) > 100:
                 self.history[guild_id_str] = self.history[guild_id_str][:100]
             
-            # 파일에 저장
             self.save_history()
         except Exception as e:
             print(f"히스토리 저장 중 오류: {e}")
@@ -631,12 +585,9 @@ class Music(commands.Cog):
         """YouTube URL을 재생합니다. (URL 검증 개선)"""
         async with ctx.typing():
             try:
-                # URL 전처리
                 if not url.startswith(('http://', 'https://', 'ytsearch:')):
-                    # 검색어로 처리
                     url = f"ytsearch:{url}"
                 
-                # URL을 대기열에 추가
                 player = self.get_player(ctx)
                 
                 if not player:
@@ -652,27 +603,22 @@ class Music(commands.Cog):
                         await self.delete_command_message(ctx)
                         return
                 
-                # URL을 대기열에 추가
                 await player.queue.put(url)
                 
-                # URL 정보 추출하여 제목 표시 (403 오류 방지 개선)
-                title = url  # 기본값 설정
+                title = url
                 try:
-                    # 여러 방법으로 정보 추출 시도
                     max_extract_retries = 3
                     for retry in range(max_extract_retries):
                         try:
-                            # 새로운 yt-dlp 인스턴스 생성
                             extract_options = ytdl_format_options.copy()
                             if retry > 0:
-                                # 재시도 시 더 보수적인 설정
                                 extract_options['socket_timeout'] = 30 + (retry * 10)
-                                await asyncio.sleep(retry * 2)  # 점진적 지연
+                                await asyncio.sleep(retry * 2)
                             
                             ydl = create_ytdl_instance(extract_options)
                             info = await self.bot.loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False))
                             title = info.get('title', url)
-                            break  # 성공하면 루프 종료
+                            break
                         except Exception as retry_error:
                             error_msg = str(retry_error).lower()
                             if '403' in error_msg or 'forbidden' in error_msg:
@@ -689,7 +635,6 @@ class Music(commands.Cog):
                     print(f"정보 추출 완전 실패: {extract_error}")
                     title = "❓ 알 수 없는 영상"
                 
-                # 현재 재생 중인 곡이 없을 때만 재생 시작
                 if not player.is_playing:
                     await ctx.send(f"선생님, '{title}'을(를) 재생할게요!", delete_after=10)
                 else:
@@ -698,7 +643,7 @@ class Music(commands.Cog):
                 try:
                     await ctx.message.delete()
                 except:
-                    pass  # 메시지 삭제 실패 시 무시
+                    pass
                     
             except Exception as e:
                 await ctx.send(f"선생님, 재생 중 오류가 발생했어요: {str(e)[:100]}...", delete_after=10)
@@ -758,7 +703,7 @@ class Music(commands.Cog):
     @commands.command(aliases=['나가!'])
     async def leave(self, ctx):
         """봇을 음성 채널에서 내보냅니다."""
-        await self.stop(ctx)  # stop 명령어를 재사용
+        await self.stop(ctx)
         await self.delete_command_message(ctx)
 
     @commands.command(aliases=['볼륨'])
@@ -796,7 +741,6 @@ class Music(commands.Cog):
             playlist = self.playlists[user_id][playlist_name]
             playlist_str = "\n".join(f"{i + 1}. {url}" for i, url in enumerate(playlist))
 
-            # 플레이리스트의 곡 목록을 보여주고 추가할지 물어봄
             confirm_view = View()
 
             async def add_to_queue_callback(add_interaction):
@@ -893,7 +837,7 @@ class Music(commands.Cog):
         if amount < 1:
             return await ctx.send("어라? 1개 이상의 메시지를 지정해 주셔야 해요. 아리스가 삭제할 수 있게요!", delete_after=10)
 
-        deleted = await ctx.channel.purge(limit=amount + 1)  # 명령어 메시지도 포함해서 삭제
+        deleted = await ctx.channel.purge(limit=amount + 1)
         await ctx.send(f"선생님, {len(deleted) - 1}개의 메시지를 깨끗하게 지웠어요! 아리스가 열심히 청소했답니다~", delete_after=5)
         await self.delete_command_message(ctx)
 
@@ -914,7 +858,6 @@ class Music(commands.Cog):
             if not command.hidden:
                 embed.add_field(name=f"!{command.name}", value=command.help or "설명이 없어요.", inline=False)
 
-        # 30초 후 자동으로 삭제되도록 설정
         message = await ctx.send(embed=embed)
         await asyncio.sleep(30)
         await message.delete(delay=2)
@@ -924,30 +867,24 @@ class Music(commands.Cog):
         """현재 재생 목록을 표시합니다."""
         player = self.get_player(ctx)
         try:
-            # 대기열이 비어있는지 확인
             if player.queue.empty():
                 await ctx.send("앗, 선생님! 재생 목록이 비어있어요! 노래를 추가해주시면 아리스가 열심히 불러드릴게요~", delete_after=10)
                 await self.delete_command_message(ctx)
                 return
 
-            # 대기열에서 요소 가져오기
-            upcoming = list(player.queue._queue)  # 큐의 모든 요소 리스트로 가져오기
+            upcoming = list(player.queue._queue)
 
-            # 곡 목록 형식화
             fmt_list = []
             for track in upcoming:
                 if isinstance(track, dict) and 'title' in track:
-                    # track이 딕셔너리일 경우 타이틀 정보 사용
                     fmt_list.append(f'**`{track["title"]}`**')
                 elif isinstance(track, str):
-                    # track이 문자열일 경우 (아마 URL일 가능성 높음)
-                    fmt_list.append(f'**`{track}`**')  # URL을 출력하거나 추가적인 정보 필요시 수정 가능
+                    fmt_list.append(f'**`{track}`**')
                 else:
                     fmt_list.append("**`알 수 없는 형식의 곡 정보`**")
 
             fmt = '\n'.join(fmt_list)
 
-            # Embed 길이 제한 검사 및 수정
             if len(fmt) > 2048:
                 fmt = fmt[:2000] + "\n... (너무 길어서 일부 내용만 보여드려요)"
 
@@ -963,22 +900,22 @@ class Music(commands.Cog):
             print(f"delete_command_message 오류: {e}")
 
     @commands.command(name='재시작', aliases=['restart', 'try'])
-    @commands.has_permissions(administrator=True)  # 관리자 권한 필요
+    @commands.has_permissions(administrator=True)
     async def restart(self, ctx):
         """프로그램을 재시작합니다."""
-        await ctx.send("아리스가 재시작할게요! 잠시만 기다려주세요...", delete_after=5)  # 수정된 부분
-        self.restart_program()  # 프로그램 재시작 호출
+        await ctx.send("아리스가 재시작할게요! 잠시만 기다려주세요...", delete_after=5)
+        self.restart_program()
 
     def restart_program(self):
         """현재 프로그램을 재시작합니다."""
         os.execv(sys.executable, ['python'] + sys.argv)
 
     @commands.command(name='종료봇', aliases=['exit'])
-    @commands.has_permissions(administrator=True)  # 관리자 권한 필요
+    @commands.has_permissions(administrator=True)
     async def exit_bot(self, ctx):
         """봇을 종료합니다."""
         await ctx.send("아리스가 종료될게요! 안녕히 가세요!", delete_after=10)
-        await self.bot.close()  # 봇 종료
+        await self.bot.close()
 
     @commands.command(name='플레이리스트삭제', aliases=['플래이리스트삭제', 'playrestdelete'])
     async def 플레이리스트삭제(self, ctx):
@@ -1031,7 +968,6 @@ class Music(commands.Cog):
             await ctx.send("선생님, 아직 플레이리스트가 없어요. 새로 만들어볼까요?", delete_after=10)
             return
 
-        # 플레이리스트 선택을 위한 선택지 생성
         playlist_options = [discord.SelectOption(label=name, value=name) for name in self.playlists[user_id].keys()]
         playlist_select = Select(placeholder="삭제할 플레이리스트를 선택하세요", options=playlist_options)
 
@@ -1044,22 +980,20 @@ class Music(commands.Cog):
                                                         ephemeral=True, delete_after=5)
                 return
 
-            # 노래 선택을 위한 선택지 생성
             song_options = [discord.SelectOption(label=f"{i + 1}. {url}", value=str(i)) for i, url in
                             enumerate(selected_playlist)]
             song_select = Select(placeholder="삭제할 노래를 선택하세요", options=song_options)
 
             async def song_select_callback(interaction):
-                index = int(song_select.values[0])  # 선택된 값은 인덱스
-                removed_song = selected_playlist[index]  # 삭제할 노래 저장
+                index = int(song_select.values[0])
+                removed_song = selected_playlist[index]
 
-                # 삭제 확인을 위한 버튼 추가
                 confirm_view = View()
                 confirm_button = Button(label="삭제하기", style=discord.ButtonStyle.danger)
                 cancel_button = Button(label="취소하기", style=discord.ButtonStyle.secondary)
 
                 async def confirm_callback(confirm_interaction):
-                    selected_playlist.pop(index)  # 선택된 노래 삭제
+                    selected_playlist.pop(index)
                     self.save_playlists()
                     await confirm_interaction.response.send_message(
                         f"선생님의 '{selected_playlist_name}' 플레이리스트에서 '{removed_song}' 노래가 삭제되었어요!", ephemeral=True,
@@ -1124,7 +1058,6 @@ class Music(commands.Cog):
                 inline=False
             )
         
-        # 버튼 추가
         view = View(timeout=60)
         
         if page > 1:
@@ -1163,12 +1096,10 @@ class Music(commands.Cog):
             await self.delete_command_message(ctx)
             return
         
-        # 히스토리에서 선택된 곡 가져오기
         selected_song = history_list[index - 1]
         url = selected_song['url']
         title = selected_song['title']
         
-        # 음성 채널 연결 확인
         player = self.get_player(ctx)
         if not player:
             await ctx.send("선생님, 음성 채널에 먼저 입장해주세요! 아리스가 따라갈게요~", delete_after=10)
@@ -1183,7 +1114,6 @@ class Music(commands.Cog):
                 await self.delete_command_message(ctx)
                 return
         
-        # 대기열에 추가
         await player.queue.put(url)
         
         if not player.is_playing:
@@ -1204,7 +1134,6 @@ class Music(commands.Cog):
             await self.delete_command_message(ctx)
             return
         
-        # 확인 버튼 추가
         view = View(timeout=30)
         
         async def confirm_callback(interaction):
@@ -1237,10 +1166,8 @@ class Music(commands.Cog):
             await self.delete_command_message(ctx)
             return
         
-        # 대기열 내용을 리스트로 변환
         queue_list = list(player.queue._queue)
         
-        # 현재 시간으로 로그 파일명 생성
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         log_filename = f'queue_log_{timestamp}.txt'
         
@@ -1273,12 +1200,10 @@ class Music(commands.Cog):
             await self.delete_command_message(ctx)
             return
         
-        # 날짜가 제공되지 않은 경우 사용 가능한 날짜 목록 표시
         if date_str is None:
             await self.show_available_dates(ctx)
             return
         
-        # 날짜 형식 검증
         try:
             from datetime import datetime
             target_date = datetime.strptime(date_str, '%Y-%m-%d').date()
@@ -1287,12 +1212,11 @@ class Music(commands.Cog):
             await self.delete_command_message(ctx)
             return
         
-        # 해당 날짜의 노래들 찾기
         target_date_str = target_date.strftime('%Y-%m-%d')
         songs_for_date = []
         
         for song in self.history[guild_id_str]:
-            song_date = song['played_at'][:10]  # YYYY-MM-DD 부분만 추출
+            song_date = song['played_at'][:10]
             if song_date == target_date_str:
                 songs_for_date.append(song)
         
@@ -1301,7 +1225,6 @@ class Music(commands.Cog):
             await self.delete_command_message(ctx)
             return
         
-        # 음성 채널 연결 확인
         player = self.get_player(ctx)
         if not player:
             await ctx.send("선생님, 음성 채널에 먼저 입장해주세요! 아리스가 따라갈게요~", delete_after=10)
@@ -1316,7 +1239,6 @@ class Music(commands.Cog):
                 await self.delete_command_message(ctx)
                 return
         
-        # 중복 제거 (같은 노래가 여러 번 재생된 경우)
         unique_songs = []
         seen_urls = set()
         for song in songs_for_date:
@@ -1324,7 +1246,6 @@ class Music(commands.Cog):
                 unique_songs.append(song)
                 seen_urls.add(song['url'])
         
-        # 대기열에 추가
         added_count = 0
         for song in unique_songs:
             try:
@@ -1333,7 +1254,6 @@ class Music(commands.Cog):
             except Exception as e:
                 print(f"노래 추가 중 오류: {e}")
         
-        # 재생 시작
         if not player.is_playing and added_count > 0:
             await ctx.send(f"선생님, {target_date_str}에 들었던 {added_count}곡을 대기열에 추가하고 재생할게요!", delete_after=10)
             await player.play_next()
@@ -1347,22 +1267,19 @@ class Music(commands.Cog):
         guild_id_str = str(ctx.guild.id)
         history_list = self.history[guild_id_str]
         
-        # 날짜별로 노래 수 집계
         date_counts = {}
         for song in history_list:
-            date_key = song['played_at'][:10]  # YYYY-MM-DD 부분만 추출
+            date_key = song['played_at'][:10]
             if date_key not in date_counts:
                 date_counts[date_key] = 0
             date_counts[date_key] += 1
         
-        # 날짜순으로 정렬 (최신순)
         sorted_dates = sorted(date_counts.items(), reverse=True)
         
         if not sorted_dates:
             await ctx.send("선생님, 아직 재생 기록이 없어요!", delete_after=10)
             return
         
-        # 최대 25개 날짜만 표시 (Discord Select 제한)
         available_dates = sorted_dates[:25]
         
         embed = discord.Embed(
@@ -1373,10 +1290,8 @@ class Music(commands.Cog):
         
         view = View(timeout=60)
         
-        # Select 옵션 생성
         options = []
         for date_str, count in available_dates:
-            # 날짜를 더 읽기 쉽게 포맷
             try:
                 date_obj = datetime.strptime(date_str, '%Y-%m-%d')
                 formatted_date = date_obj.strftime('%Y년 %m월 %d일')
@@ -1396,13 +1311,11 @@ class Music(commands.Cog):
         async def date_select_callback(interaction):
             selected_date = select.values[0]
             
-            # 선택된 날짜의 노래 목록 보여주기
             songs_for_date = []
             for song in history_list:
                 if song['played_at'][:10] == selected_date:
                     songs_for_date.append(song)
             
-            # 중복 제거
             unique_songs = []
             seen_urls = set()
             for song in songs_for_date:
@@ -1410,7 +1323,6 @@ class Music(commands.Cog):
                     unique_songs.append(song)
                     seen_urls.add(song['url'])
             
-            # 날짜 포맷팅
             try:
                 date_obj = datetime.strptime(selected_date, '%Y-%m-%d')
                 formatted_date = date_obj.strftime('%Y년 %m월 %d일')
@@ -1424,7 +1336,6 @@ class Music(commands.Cog):
             confirm_view = View(timeout=30)
             
             async def add_all_callback(add_interaction):
-                # 음성 채널 연결 확인
                 player = self.get_player(ctx)
                 if not ctx.voice_client:
                     if ctx.author.voice:
@@ -1434,7 +1345,6 @@ class Music(commands.Cog):
                             "선생님, 음성 채널에 먼저 입장해주세요!", ephemeral=True, delete_after=5)
                         return
                 
-                # 대기열에 추가
                 added_count = 0
                 for song in unique_songs:
                     try:
@@ -1443,7 +1353,6 @@ class Music(commands.Cog):
                     except Exception as e:
                         print(f"노래 추가 중 오류: {e}")
                 
-                # 재생 시작
                 if not player.is_playing and added_count > 0:
                     await add_interaction.response.send_message(
                         f"선생님, {formatted_date}에 들었던 {added_count}곡을 대기열에 추가하고 재생할게요!", 
@@ -1486,13 +1395,11 @@ class Music(commands.Cog):
             await self.delete_command_message(ctx)
             return
         
-        # 이번 주 시작과 끝 날짜 계산
         from datetime import datetime, timedelta
         today = datetime.now().date()
-        start_of_week = today - timedelta(days=today.weekday())  # 월요일
-        end_of_week = start_of_week + timedelta(days=6)  # 일요일
+        start_of_week = today - timedelta(days=today.weekday())
+        end_of_week = start_of_week + timedelta(days=6)
         
-        # 이번 주의 노래들 찾기
         songs_this_week = []
         for song in self.history[guild_id_str]:
             try:
@@ -1507,7 +1414,6 @@ class Music(commands.Cog):
             await self.delete_command_message(ctx)
             return
         
-        # 음성 채널 연결 확인
         player = self.get_player(ctx)
         if not player:
             await ctx.send("선생님, 음성 채널에 먼저 입장해주세요! 아리스가 따라갈게요~", delete_after=10)
@@ -1522,7 +1428,6 @@ class Music(commands.Cog):
                 await self.delete_command_message(ctx)
                 return
         
-        # 중복 제거
         unique_songs = []
         seen_urls = set()
         for song in songs_this_week:
@@ -1530,7 +1435,6 @@ class Music(commands.Cog):
                 unique_songs.append(song)
                 seen_urls.add(song['url'])
         
-        # 대기열에 추가
         added_count = 0
         for song in unique_songs:
             try:
@@ -1539,7 +1443,6 @@ class Music(commands.Cog):
             except Exception as e:
                 print(f"노래 추가 중 오류: {e}")
         
-        # 재생 시작
         if not player.is_playing and added_count > 0:
             await ctx.send(f"선생님, 이번 주에 들었던 {added_count}곡을 대기열에 추가하고 재생할게요!", delete_after=10)
             await player.play_next()

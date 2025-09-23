@@ -10,13 +10,6 @@ from discord.ext import commands
 logger = logging.getLogger(__name__)
 
 
-# ----------------------------------------
-# Yacht Dice Game Cog (ID-based players, 일관된 동시성, 명확한 예외 처리)
-# - players 리스트는 항상 user id (int)를 저장합니다.
-# - 모든 권한/턴 체크는 user.id로 비교합니다.
-# - 상태 변경(점수 기록, 턴 전환 등)은 채널 락으로 원자화합니다.
-# - 버튼은 생성 후 속성만 갱신하도록 구성합니다.
-# ----------------------------------------
 
 
 class RecordView(discord.ui.View):
@@ -50,12 +43,10 @@ class RecordView(discord.ui.View):
             b = discord.ui.Button(label=label, style=discord.ButtonStyle.primary)
 
             async def _cat_cb(interaction: discord.Interaction, category, score):
-                # 권한 체크(레벨1) — 요청자와 뷰 소유자 동일 검사
                 if interaction.user.id != self.user.id:
                     await interaction.response.send_message("이 카테고리는 당신이 선택할 수 없습니다.", ephemeral=True)
                     return
 
-                # 락 확보(채널 단위)
                 lock = self.cog.locks.get(self.channel_id)
                 if lock is None:
                     lock = asyncio.Lock()
@@ -67,31 +58,25 @@ class RecordView(discord.ui.View):
                         await interaction.response.send_message("게임 정보를 찾을 수 없습니다.", ephemeral=True)
                         return
 
-                    # 현재 턴 플레이어인지 확인
                     current_player_id = game['players'][game['current_player']]
                     if interaction.user.id != current_player_id:
                         await interaction.response.send_message("지금은 당신의 턴이 아닙니다.", ephemeral=True)
                         return
 
-                    # 이미 기록되었는지 다시 확인
                     if game['scores'].get(self.user.id, {}).get(category) is not None:
                         await interaction.response.send_message("이미 이 카테고리에 점수가 기록되어 있습니다.", ephemeral=True)
                         return
 
-                    # 점수 기록
                     game['scores'][self.user.id][category] = score
 
-                    # 턴 전환을 원자적으로 수행 (락을 이미 보유 중)
                     try:
                         await self.cog._advance_turn_unlocked(self.channel_id, interaction.guild)
                     except Exception:
                         logger.exception("_advance_turn_unlocked 실패")
 
-                # 뷰 비활성화
                 for item in self.children:
                     item.disabled = True
 
-                # 응답(가능하면 편집, 실패 시 followup)
                 kr = self.category_names.get(category, category)
                 try:
                     await interaction.response.edit_message(content=f"`{kr}`에 **{score}점** 기록했습니다! 점수 기록 창이 닫힙니다.", embed=None, view=self)
@@ -101,7 +86,6 @@ class RecordView(discord.ui.View):
                     except Exception:
                         logger.exception("후속 응답 실패")
 
-                # 채널에 간단 공지
                 channel = self.cog.bot.get_channel(self.channel_id)
                 if channel:
                     try:
@@ -111,11 +95,9 @@ class RecordView(discord.ui.View):
                     except discord.HTTPException:
                         logger.exception("공지 전송 실패")
 
-            # partial로 바인딩
             b.callback = functools.partial(_cat_cb, category=cat, score=score)
             self.add_item(b)
 
-        # 취소 버튼
         cancel_btn = discord.ui.Button(label="취소", style=discord.ButtonStyle.secondary)
 
         async def _cancel_cb(interaction: discord.Interaction):
@@ -147,7 +129,6 @@ class RecordView(discord.ui.View):
     async def on_timeout(self):
         for item in self.children:
             item.disabled = True
-        # ephemeral 메시지용 뷰이므로 편집 불가 — 채널에 알림
         channel = self.cog.bot.get_channel(self.channel_id)
         if channel:
             try:
@@ -168,7 +149,6 @@ class YachtGameView(discord.ui.View):
         if not self.game:
             return
 
-        # 버튼을 한 번만 생성
         self.roll_btn = discord.ui.Button(label="", style=discord.ButtonStyle.green)
         self.add_item(self.roll_btn)
 
@@ -182,7 +162,6 @@ class YachtGameView(discord.ui.View):
         self.record_btn = discord.ui.Button(label="✅ 점수 기록", style=discord.ButtonStyle.red)
         self.add_item(self.record_btn)
 
-        # 콜백 바인딩
         self.roll_btn.callback = self._roll_cb
         for idx, b in enumerate(self.dice_buttons):
             b.callback = functools.partial(self._dice_cb, index=idx)
@@ -305,7 +284,6 @@ class YachtGameView(discord.ui.View):
 
     def create_embed_for_current_player(self, title, description):
         current_id = self.game['players'][self.game['current_player']]
-        # 우선 디스코드 캐시에서 사용자 검색
         current_user = None
         try:
             current_user = self.cog.bot.get_user(current_id)
@@ -332,7 +310,6 @@ class YachtGameView(discord.ui.View):
         for item in self.children:
             item.disabled = True
 
-        # last_message_id 편집 시도 — 실패하면 새 메시지 전송
         if self.game and self.game.get('last_message_id'):
             channel = self.cog.bot.get_channel(self.channel_id)
             if channel:
@@ -357,9 +334,7 @@ class YachtGameView(discord.ui.View):
 class YachtDiceGame(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        # games: channel_id -> dict (players는 user_id 리스트로 저장)
         self.games = {}
-        # locks: channel_id -> asyncio.Lock() (동시성 보호)
         self.locks = {}
 
     def calculate_score(self, dice, category):
@@ -417,7 +392,6 @@ class YachtDiceGame(commands.Cog):
         channel_id = ctx.channel.id
         player = ctx.author
 
-        # 채널 락 확보
         lock = self.locks.get(channel_id)
         if lock is None:
             lock = asyncio.Lock()
@@ -460,7 +434,6 @@ class YachtDiceGame(commands.Cog):
 
                 game['players'].append(player.id)
 
-                # 표시용 이름 수집
                 player_names = []
                 for p_id in game['players']:
                     user = ctx.guild.get_member(p_id) if ctx.guild else self.bot.get_user(p_id)
@@ -483,7 +456,6 @@ class YachtDiceGame(commands.Cog):
     @commands.command(name='시작', help='대기 중인 야추 게임을 시작합니다.')
     async def start_yacht_game(self, ctx):
         channel_id = ctx.channel.id
-        # 락 확보
         lock = self.locks.get(channel_id)
         if lock is None:
             lock = asyncio.Lock()
@@ -507,7 +479,6 @@ class YachtDiceGame(commands.Cog):
                 await ctx.send("최소 2명 이상의 플레이어가 필요합니다.")
                 return
 
-            # 점수판 초기화
             for p_id in game['players']:
                 game['scores'][p_id] = {
                     'ones': None, 'twos': None, 'threes': None, 'fours': None, 'fives': None, 'sixes': None,
@@ -517,7 +488,6 @@ class YachtDiceGame(commands.Cog):
 
             game['state'] = 'playing'
 
-            # 표시용 이름 수집
             player_names = []
             for p_id in game['players']:
                 user = ctx.guild.get_member(p_id) if ctx.guild else self.bot.get_user(p_id)
