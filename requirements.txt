@@ -1,0 +1,9 @@
+discord.py>=2.3.0
+python-dotenv>=1.0.0
+yt-dlp>=2023.10.0
+async-timeout>=4.0.0
+fuzzywuzzy>=0.18.0
+python-Levenshtein>=0.21.0
+gtts>=2.5.0
+TTS>=0.20.0  # Coqui TTS (선택적, 더 많은 음성 모델과 커스텀 모델 지원)
+
