@@ -4,15 +4,21 @@ import logging
 import discord
 from discord.ext import commands
 from pathlib import Path
-from utils.tts_utils import text_to_speech, cleanup_tts_file, VOICE_MODELS, COQUI_AVAILABLE, COQUI_MODELS
+from utils.tts_utils import text_to_speech, cleanup_tts_file, VOICE_MODELS, COQUI_AVAILABLE, COQUI_MODELS, _lazy_import_coqui
 from utils.file_utils import load_tts_settings, save_tts_settings
 from utils.config import COMMAND_MESSAGE_DELETE_DELAY
 
-# Coqui TTS 지원 확인
-try:
-    from utils.coqui_tts_utils import list_available_models
-except ImportError:
-    list_available_models = lambda: []
+# Coqui TTS 지원 확인 (lazy import)
+list_available_models = None
+
+def _get_list_available_models():
+    """list_available_models 함수를 lazy로 가져옵니다."""
+    global list_available_models
+    if list_available_models is None:
+        _lazy_import_coqui()
+        from utils.tts_utils import list_available_models as _func
+        list_available_models = _func if _func else lambda: []
+    return list_available_models
 
 logger = logging.getLogger(__name__)
 
@@ -70,17 +76,25 @@ class TTS(commands.Cog):
         """TTS를 재생합니다."""
         try:
             # Coqui TTS 사용
-            if use_coqui and COQUI_AVAILABLE:
-                if coqui_model is None:
-                    # 언어에 맞는 기본 모델 선택
-                    if lang in COQUI_MODELS:
-                        coqui_model = list(COQUI_MODELS[lang].keys())[0]
-                    else:
-                        coqui_model = 'tts_models/ko/korean/jets'
+            if use_coqui:
+                _lazy_import_coqui()
+                # COQUI_AVAILABLE을 다시 확인 (lazy import 후 업데이트됨)
+                from utils.tts_utils import COQUI_AVAILABLE as _coqui_avail, COQUI_MODELS as _models
                 
-                # Coqui TTS는 비동기로 실행
-                from utils.coqui_tts_utils import text_to_speech_coqui_async
-                tts_file = await text_to_speech_coqui_async(text, coqui_model)
+                if _coqui_avail:
+                    if coqui_model is None:
+                        # 언어에 맞는 기본 모델 선택
+                        if lang in _models:
+                            coqui_model = list(_models[lang].keys())[0]
+                        else:
+                            coqui_model = 'tts_models/ko/korean/jets'
+                    
+                    # Coqui TTS는 비동기로 실행 (lazy import)
+                    from utils.coqui_tts_utils import text_to_speech_coqui_async
+                    tts_file = await text_to_speech_coqui_async(text, coqui_model)
+                else:
+                    # Coqui TTS를 사용할 수 없으면 gTTS로 폴백
+                    use_coqui = False
             else:
                 # gTTS 사용
                 tld = 'com'  # 기본값
@@ -294,6 +308,10 @@ class TTS(commands.Cog):
         
         view = discord.ui.View()
         
+        # Coqui TTS 사용 가능 여부 확인 (lazy import)
+        _lazy_import_coqui()
+        from utils.tts_utils import COQUI_AVAILABLE as _coqui_avail
+        
         # TTS 엔진 선택 (gTTS 또는 Coqui)
         engine_select = discord.ui.Select(
             placeholder=f"TTS 엔진 선택 (현재: {'Coqui TTS' if use_coqui else 'gTTS'})",
@@ -309,7 +327,7 @@ class TTS(commands.Cog):
                     value="coqui",
                     description="고품질 TTS, 커스텀 모델 지원",
                     default=use_coqui,
-                    disabled=(not COQUI_AVAILABLE)
+                    disabled=(not _coqui_avail)
                 )
             ]
         )
@@ -345,13 +363,15 @@ class TTS(commands.Cog):
         view.add_item(engine_select)
         
         # Coqui TTS를 사용하는 경우
-        if use_coqui and COQUI_AVAILABLE:
-            if current_lang not in COQUI_MODELS:
+        if use_coqui and _coqui_avail:
+            # COQUI_MODELS 업데이트 확인
+            from utils.tts_utils import COQUI_MODELS as _models
+            if current_lang not in _models:
                 await ctx.send(f"선생님, '{current_lang}' 언어는 Coqui TTS에서 지원되지 않아요!", delete_after=10)
                 await self.delete_command_message(ctx)
                 return
             
-            available_models = COQUI_MODELS[current_lang]
+            available_models = _models[current_lang]
             
             # Coqui 모델 선택
             model_select = discord.ui.Select(
@@ -399,7 +419,7 @@ class TTS(commands.Cog):
                         description=f"{lang} 언어로 변경",
                         default=(lang == current_lang)
                     )
-                    for lang in COQUI_MODELS.keys()
+                    for lang in _models.keys()
                 ]
             )
             
@@ -410,8 +430,9 @@ class TTS(commands.Cog):
                 
                 selected_lang = coqui_lang_select.values[0]
                 # 언어 변경 시 기본 모델로 설정
-                if selected_lang in COQUI_MODELS:
-                    default_model = list(COQUI_MODELS[selected_lang].keys())[0]
+                from utils.tts_utils import COQUI_MODELS as _models_update
+                if selected_lang in _models_update:
+                    default_model = list(_models_update[selected_lang].keys())[0]
                     self.set_user_settings(
                         ctx.author.id,
                         ctx.guild.id,
@@ -549,9 +570,12 @@ class TTS(commands.Cog):
         coqui_model = settings.get('coqui_model', None)
         
         # 모델 이름 가져오기
-        if use_coqui and COQUI_AVAILABLE:
-            if lang in COQUI_MODELS and coqui_model in COQUI_MODELS[lang]:
-                model_name = COQUI_MODELS[lang][coqui_model]['name']
+        if use_coqui:
+            _lazy_import_coqui()
+            from utils.tts_utils import COQUI_AVAILABLE as _coqui_avail, COQUI_MODELS as _models
+            
+            if _coqui_avail and lang in _models and coqui_model in _models[lang]:
+                model_name = _models[lang][coqui_model]['name']
             else:
                 model_name = coqui_model or "기본"
             engine_name = "Coqui TTS"

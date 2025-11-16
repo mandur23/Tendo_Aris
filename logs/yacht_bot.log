@@ -113,3 +113,8 @@ TypeError: expected string or bytes-like object, got 'NoneType'
 2025-11-16 06:20:22,382 - core.music_player - INFO - 재생 직전 URL 새로고침 성공 (재생 시도 1)
 2025-11-16 06:20:22,382 - core.music_player - INFO - 재생 시도 1/2: 이세계아이돌(ISEGYE IDOL) 'Be My Light' Official Performance MV (URL: https://rr3---sn-ixaav8pnpvo-pjoz.googlevideo.com/...)
 2025-11-16 06:20:27,399 - core.music_player - INFO - 재생 시작 성공
+2025-11-16 22:02:12,460 - core.bot - INFO - 아리스가 준비 완료했어요! 텐노아리스#7448로 로그인했답니다~
+2025-11-16 22:08:45,518 - core.bot - INFO - 아리스가 준비 완료했어요! 텐노아리스#7448로 로그인했답니다~
+2025-11-16 22:19:02,976 - discord.client - WARNING - PyNaCl is not installed, voice will NOT be supported
+2025-11-16 22:19:06,434 - core.bot - INFO - 아리스가 준비 완료했어요! 텐노아리스#7448로 로그인했답니다~
+2025-11-16 22:27:52,322 - core.bot - INFO - 아리스가 준비 완료했어요! 텐노아리스#7448로 로그인했답니다~

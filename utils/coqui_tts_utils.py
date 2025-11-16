@@ -7,13 +7,26 @@ from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 
-# Coqui TTS 사용 가능 여부 확인
-try:
-    from TTS.api import TTS
-    COQUI_AVAILABLE = True
-except ImportError:
-    COQUI_AVAILABLE = False
-    logger.warning("Coqui TTS가 설치되지 않았습니다. pip install TTS로 설치하세요.")
+# Coqui TTS 사용 가능 여부 확인 (lazy import)
+COQUI_AVAILABLE = None
+_TTS_CLASS = None
+
+def _check_coqui_available():
+    """Coqui TTS 사용 가능 여부를 확인합니다 (lazy check)."""
+    global COQUI_AVAILABLE, _TTS_CLASS
+    
+    if COQUI_AVAILABLE is not None:
+        return COQUI_AVAILABLE
+    
+    try:
+        from TTS.api import TTS
+        _TTS_CLASS = TTS
+        COQUI_AVAILABLE = True
+        return True
+    except (ImportError, OSError, Exception) as e:
+        COQUI_AVAILABLE = False
+        logger.warning(f"Coqui TTS를 로드할 수 없습니다: {e}")
+        return False
 
 # TTS 임시 파일 저장 경로
 TTS_TEMP_DIR = Path('logs/tts_temp')
@@ -64,19 +77,24 @@ COQUI_MODELS = {
 
 def get_coqui_tts(model_name: str = None):
     """Coqui TTS 인스턴스를 가져옵니다."""
-    global _coqui_tts_instance
+    global _coqui_tts_instance, _TTS_CLASS
     
-    if not COQUI_AVAILABLE:
-        raise ImportError("Coqui TTS가 설치되지 않았습니다. pip install TTS로 설치하세요.")
+    if not _check_coqui_available():
+        raise ImportError("Coqui TTS가 설치되지 않았거나 로드할 수 없습니다. pip install TTS로 설치하세요.")
+    
+    # TTS 클래스가 없으면 다시 import 시도
+    if _TTS_CLASS is None:
+        from TTS.api import TTS
+        _TTS_CLASS = TTS
     
     # 기본 모델 선택
     if model_name is None:
         model_name = 'tts_models/ko/korean/jets'  # 한국어 기본 모델
     
     # 모델이 변경되었거나 인스턴스가 없으면 새로 생성
-    if _coqui_tts_instance is None or _coqui_tts_instance.model_name != model_name:
+    if _coqui_tts_instance is None or getattr(_coqui_tts_instance, 'model_name', None) != model_name:
         try:
-            _coqui_tts_instance = TTS(model_name=model_name, progress_bar=False)
+            _coqui_tts_instance = _TTS_CLASS(model_name=model_name, progress_bar=False)
             logger.info(f"Coqui TTS 모델 로드 완료: {model_name}")
         except Exception as e:
             logger.error(f"Coqui TTS 모델 로드 실패: {e}")
@@ -103,8 +121,8 @@ def text_to_speech_coqui(
     Returns:
         생성된 음성 파일 경로
     """
-    if not COQUI_AVAILABLE:
-        raise ImportError("Coqui TTS가 설치되지 않았습니다.")
+    if not _check_coqui_available():
+        raise ImportError("Coqui TTS가 설치되지 않았거나 로드할 수 없습니다.")
     
     try:
         # 출력 파일 경로 설정
@@ -154,11 +172,14 @@ async def text_to_speech_coqui_async(
 
 def list_available_models():
     """사용 가능한 Coqui TTS 모델 목록을 반환합니다."""
-    if not COQUI_AVAILABLE:
+    if not _check_coqui_available():
         return {}
     
     try:
-        tts = TTS()
+        if _TTS_CLASS is None:
+            from TTS.api import TTS
+            _TTS_CLASS = TTS
+        tts = _TTS_CLASS()
         available_models = tts.list_models()
         return available_models
     except Exception as e:
@@ -168,11 +189,14 @@ def list_available_models():
 
 def get_model_info(model_name: str):
     """모델 정보를 가져옵니다."""
-    if not COQUI_AVAILABLE:
+    if not _check_coqui_available():
         return None
     
     try:
-        tts = TTS(model_name=model_name)
+        if _TTS_CLASS is None:
+            from TTS.api import TTS
+            _TTS_CLASS = TTS
+        tts = _TTS_CLASS(model_name=model_name)
         return {
             'name': model_name,
             'language': getattr(tts, 'language', None),
@@ -181,4 +205,5 @@ def get_model_info(model_name: str):
     except Exception as e:
         logger.error(f"모델 정보 가져오기 실패: {e}")
         return None
+
 

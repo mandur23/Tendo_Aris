@@ -5,17 +5,33 @@ from pathlib import Path
 from gtts import gTTS
 import tempfile
 
-# Coqui TTS 지원 (선택적)
-try:
-    from utils.coqui_tts_utils import (
-        COQUI_AVAILABLE,
-        text_to_speech_coqui_async,
-        COQUI_MODELS,
-        list_available_models
-    )
-except ImportError:
-    COQUI_AVAILABLE = False
-    COQUI_MODELS = {}
+# Coqui TTS 지원 (선택적, lazy import)
+COQUI_AVAILABLE = False
+COQUI_MODELS = {}
+text_to_speech_coqui_async = None
+list_available_models = None
+
+def _lazy_import_coqui():
+    """Coqui TTS를 지연 로딩합니다."""
+    global COQUI_AVAILABLE, COQUI_MODELS, text_to_speech_coqui_async, list_available_models
+    
+    if COQUI_AVAILABLE is False and list_available_models is None:
+        try:
+            from utils.coqui_tts_utils import (
+                _check_coqui_available,
+                text_to_speech_coqui_async as _async_func,
+                COQUI_MODELS as _models,
+                list_available_models as _list_models
+            )
+            COQUI_AVAILABLE = _check_coqui_available()
+            if COQUI_AVAILABLE:
+                text_to_speech_coqui_async = _async_func
+                COQUI_MODELS = _models
+                list_available_models = _list_models
+        except (ImportError, OSError, Exception) as e:
+            logger.warning(f"Coqui TTS를 로드할 수 없습니다: {e}")
+            COQUI_AVAILABLE = False
+            COQUI_MODELS = {}
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +99,9 @@ def text_to_speech(
         생성된 음성 파일 경로
     """
     # Coqui TTS 사용
+    if use_coqui:
+        _lazy_import_coqui()
+    
     if use_coqui and COQUI_AVAILABLE:
         if coqui_model is None:
             # 언어에 맞는 기본 모델 선택
