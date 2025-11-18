@@ -58,6 +58,12 @@ class FuzzyBot(commands.Bot):
 
     async def on_ready(self):
         logger.info(f'아리스가 준비 완료했어요! {self.user}로 로그인했답니다~')
+        # Slash Commands 동기화
+        try:
+            synced = await self.tree.sync()
+            logger.info(f"Slash Commands {len(synced)}개가 동기화되었습니다.")
+        except Exception as e:
+            logger.error(f"Slash Commands 동기화 실패: {e}")
 
     async def on_command_error(self, ctx, error):
         """전역 명령어 에러 핸들러"""

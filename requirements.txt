@@ -25,4 +25,3 @@ requests>=2.31.0
 # wmi>=1.5.1; sys_platform == 'win32'
 # Linux AMD: ROCm은 외부 도구(rocm-smi)가 필요합니다. pip로 설치하는 항목은 없습니다.
 # Intel Linux: intel-gpu-tools 패키지(intel_gpu_top)는 OS 패키지 관리자(apt/yum)로 설치하세요.
-

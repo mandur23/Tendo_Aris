@@ -149,3 +149,56 @@ discord.errors.LoginFailure: Improper token has been passed.
 2025-11-18 16:38:59,863 - core.bot - INFO - 아리스가 준비 완료했어요! 텐노아리스#7448로 로그인했답니다~
 2025-11-18 16:39:06,572 - __main__ - INFO - 시그널 2을 받았습니다. 봇을 종료합니다.
 2025-11-18 16:39:06,786 - __main__ - INFO - 봇이 정상적으로 종료되었습니다.
+2025-11-18 17:14:52,481 - core.bot - INFO - 아리스가 준비 완료했어요! 텐노아리스#7448로 로그인했답니다~
+2025-11-18 17:15:04,972 - __main__ - INFO - 시그널 2을 받았습니다. 봇을 종료합니다.
+2025-11-18 17:15:05,181 - __main__ - INFO - 봇이 정상적으로 종료되었습니다.
+2025-11-18 17:19:39,445 - dashboard.server - INFO - 대시보드 서버 시작: http://0.0.0.0:8000
+2025-11-18 17:19:42,816 - core.bot - INFO - 아리스가 준비 완료했어요! 텐노아리스#7448로 로그인했답니다~
+2025-11-18 17:20:28,549 - __main__ - INFO - 시그널 2을 받았습니다. 봇을 종료합니다.
+2025-11-18 17:20:28,760 - __main__ - INFO - 봇이 정상적으로 종료되었습니다.
+2025-11-18 17:27:24,016 - dashboard.server - INFO - 대시보드 서버 시작: http://0.0.0.0:8000
+2025-11-18 17:27:24,027 - __main__ - ERROR - 봇 실행 중 오류 발생: Command '음악' already registered.
+Traceback (most recent call last):
+  File "C:\Users\User\PycharmProjects\Tendo_Aris\bot.py", line 49, in main
+    await bot.add_cog(Music(bot))
+  File "C:\Users\User\PycharmProjects\Tendo_Aris\.venv1\Lib\site-packages\discord\ext\commands\bot.py", line 810, in add_cog
+    cog = await cog._inject(self, override=override, guild=guild, guilds=guilds)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\PycharmProjects\Tendo_Aris\.venv1\Lib\site-packages\discord\ext\commands\cog.py", line 747, in _inject
+    bot.tree.add_command(command, override=override, guild=guild, guilds=guilds)
+  File "C:\Users\User\PycharmProjects\Tendo_Aris\.venv1\Lib\site-packages\discord\app_commands\tree.py", line 407, in add_command
+    raise CommandAlreadyRegistered(name, None)
+discord.app_commands.errors.CommandAlreadyRegistered: Command '음악' already registered.
+2025-11-18 17:29:02,618 - dashboard.server - INFO - 대시보드 서버 시작: http://0.0.0.0:8000
+2025-11-18 17:29:02,629 - __main__ - ERROR - 봇 실행 중 오류 발생: Command '음악' already registered.
+Traceback (most recent call last):
+  File "C:\Users\User\PycharmProjects\Tendo_Aris\bot.py", line 49, in main
+    await bot.add_cog(Music(bot))
+  File "C:\Users\User\PycharmProjects\Tendo_Aris\.venv1\Lib\site-packages\discord\ext\commands\bot.py", line 810, in add_cog
+    cog = await cog._inject(self, override=override, guild=guild, guilds=guilds)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\PycharmProjects\Tendo_Aris\.venv1\Lib\site-packages\discord\ext\commands\cog.py", line 747, in _inject
+    bot.tree.add_command(command, override=override, guild=guild, guilds=guilds)
+  File "C:\Users\User\PycharmProjects\Tendo_Aris\.venv1\Lib\site-packages\discord\app_commands\tree.py", line 407, in add_command
+    raise CommandAlreadyRegistered(name, None)
+discord.app_commands.errors.CommandAlreadyRegistered: Command '음악' already registered.
+2025-11-18 17:30:57,504 - dashboard.server - INFO - 대시보드 서버 시작: http://0.0.0.0:8000
+2025-11-18 17:31:02,536 - core.bot - INFO - 아리스가 준비 완료했어요! 텐노아리스#7448로 로그인했답니다~
+2025-11-18 17:31:03,062 - core.bot - INFO - Slash Commands 3개가 동기화되었습니다.
+2025-11-18 17:31:36,699 - __main__ - INFO - 시그널 2을 받았습니다. 봇을 종료합니다.
+2025-11-18 17:31:36,900 - __main__ - INFO - 봇이 정상적으로 종료되었습니다.
+2025-11-18 17:36:55,947 - dashboard.server - INFO - 대시보드 서버 시작: http://0.0.0.0:8000
+2025-11-18 17:36:59,298 - core.bot - INFO - 아리스가 준비 완료했어요! 텐노아리스#7448로 로그인했답니다~
+2025-11-18 17:36:59,668 - core.bot - INFO - Slash Commands 3개가 동기화되었습니다.
+2025-11-18 17:37:11,320 - __main__ - INFO - 시그널 2을 받았습니다. 봇을 종료합니다.
+2025-11-18 17:37:11,523 - __main__ - INFO - 봇이 정상적으로 종료되었습니다.
+2025-11-18 17:40:26,613 - dashboard.server - INFO - 대시보드 서버 시작: http://0.0.0.0:8000
+2025-11-18 17:40:29,896 - core.bot - INFO - 아리스가 준비 완료했어요! 텐노아리스#7448로 로그인했답니다~
+2025-11-18 17:40:30,280 - core.bot - INFO - Slash Commands 3개가 동기화되었습니다.
+2025-11-18 17:40:47,808 - __main__ - INFO - 시그널 2을 받았습니다. 봇을 종료합니다.
+2025-11-18 17:40:48,004 - __main__ - INFO - 봇이 정상적으로 종료되었습니다.
+2025-11-18 17:43:45,278 - dashboard.server - INFO - 대시보드 서버 시작: http://localhost:8080
+2025-11-18 17:43:48,660 - core.bot - INFO - 아리스가 준비 완료했어요! 텐노아리스#7448로 로그인했답니다~
+2025-11-18 17:43:49,160 - core.bot - INFO - Slash Commands 3개가 동기화되었습니다.
+2025-11-18 17:44:01,619 - __main__ - INFO - 시그널 2을 받았습니다. 봇을 종료합니다.
+2025-11-18 17:44:01,825 - __main__ - INFO - 봇이 정상적으로 종료되었습니다.

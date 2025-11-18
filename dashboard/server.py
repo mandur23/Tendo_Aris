@@ -12,7 +12,7 @@ _server: Optional[Server] = None
 _task: Optional[asyncio.Task] = None
 
 
-async def start_dashboard(host: str = '127.0.0.1', port: int = 8000):
+async def start_dashboard(host: str = 'localhost', port: int = 8080):
     """Uvicorn 서버를 현재 이벤트 루프의 백그라운드 태스크로 시작합니다."""
     global _server, _task
     if _server is not None:

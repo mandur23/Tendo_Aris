@@ -4,6 +4,7 @@ import asyncio
 import logging
 import discord
 from discord.ext import commands
+from discord.app_commands import command, describe, choices, Choice
 from discord.ui import Button, View, Select
 from datetime import datetime, timedelta
 from core.music_player import MusicPlayer
@@ -22,6 +23,11 @@ class Music(commands.Cog):
         self.playlists = load_playlists()
         self.history = load_history()
         ensure_logs_dir()
+        
+        # Slash Commands 그룹은 cog_load에서 생성
+        self.music_group = None
+        self.playlist_group = None
+        self.history_group = None
 
     def save_history(self):
         """히스토리를 파일에 저장합니다."""
@@ -302,9 +308,18 @@ class Music(commands.Cog):
         if name not in self.playlists[user_id]:
             self.playlists[user_id][name] = []
 
-        self.playlists[user_id][name].extend(urls)
+        # 중복 URL 제거
+        existing_urls = set(self.playlists[user_id][name])
+        new_urls = [url for url in urls if url not in existing_urls]
+        
+        if not new_urls:
+            await ctx.send(f"선생님, '{name}' 플레이리스트에 이미 모든 URL이 추가되어 있어요!", delete_after=10)
+            await delete_command_message(ctx)
+            return
+        
+        self.playlists[user_id][name].extend(new_urls)
         self.save_playlists()
-        await ctx.send(f"선생님의 '{name}' 플레이리스트에 {len(urls)}개의 곡을 추가했어요!", delete_after=10)
+        await ctx.send(f"선생님의 '{name}' 플레이리스트에 {len(new_urls)}개의 곡을 추가했어요! (중복 제외: {len(urls) - len(new_urls)}개)", delete_after=10)
         await delete_command_message(ctx)
 
     @commands.command(name='플레이리스트재생', aliases=['플래이리스트재생', 'vmffpdlfltmxmwotod'])
@@ -335,6 +350,7 @@ class Music(commands.Cog):
         user_id = str(ctx.author.id)
         if user_id not in self.playlists or not self.playlists[user_id]:
             await ctx.send("선생님, 아직 플레이리스트가 없어요. 새로 만들어볼까요?", delete_after=10)
+            await delete_command_message(ctx)
             return
 
         view = View(timeout=60)
@@ -398,6 +414,7 @@ class Music(commands.Cog):
         view.add_item(select)
 
         await ctx.send("선생님의 플레이리스트 목록이에요:", view=view, delete_after=60)
+        await delete_command_message(ctx)
 
     @commands.command(name='플레이리스트노래삭제', aliases=['프래이리스트노래삭제'])
     async def 플레이리스트노래삭제(self, ctx):
@@ -405,6 +422,7 @@ class Music(commands.Cog):
         user_id = str(ctx.author.id)
         if user_id not in self.playlists or not self.playlists[user_id]:
             await ctx.send("선생님, 아직 플레이리스트가 없어요. 새로 만들어볼까요?", delete_after=10)
+            await delete_command_message(ctx)
             return
 
         playlist_options = [discord.SelectOption(label=name, value=name) for name in self.playlists[user_id].keys()]
@@ -504,6 +522,7 @@ class Music(commands.Cog):
         playlist_view.add_item(playlist_select)
 
         await ctx.send("선생님의 플레이리스트 목록이에요:", view=playlist_view, delete_after=60)
+        await delete_command_message(ctx)
 
     # ========== 히스토리 관련 명령어 ==========
 
@@ -561,7 +580,8 @@ class Music(commands.Cog):
                     await interaction.response.send_message("선생님, 다른 사람의 히스토리를 조작할 수 없어요!", ephemeral=True, delete_after=5)
                     return
                 await interaction.response.defer()
-                await self.show_history.callback(self, ctx, page - 1)
+                # 명령어를 재귀적으로 호출
+                await self.show_history(ctx, page - 1)
             prev_button.callback = prev_callback
             view.add_item(prev_button)
         
@@ -573,7 +593,8 @@ class Music(commands.Cog):
                     await interaction.response.send_message("선생님, 다른 사람의 히스토리를 조작할 수 없어요!", ephemeral=True, delete_after=5)
                     return
                 await interaction.response.defer()
-                await self.show_history.callback(self, ctx, page + 1)
+                # 명령어를 재귀적으로 호출
+                await self.show_history(ctx, page + 1)
             next_button.callback = next_callback
             view.add_item(next_button)
         
@@ -1142,4 +1163,89 @@ class Music(commands.Cog):
         )
         confirm_view.message = message
         await delete_command_message(ctx)
+
+    # ========== Slash Commands (GUI) ==========
+    
+    # 그룹은 cog_load에서 생성되므로 여기서는 메서드만 정의
+    @discord.app_commands.describe(query="YouTube URL 또는 검색어")
+    async def slash_play(self, interaction: discord.Interaction, query: str):
+        """Slash Command로 음악 재생"""
+        # Context 객체 생성
+        ctx = await self.bot.get_context(interaction)
+        await self.play_command(ctx, url=query)
+    
+    async def slash_stop(self, interaction: discord.Interaction):
+        """Slash Command로 음악 정지"""
+        ctx = await self.bot.get_context(interaction)
+        await self.stop(ctx)
+    
+    @discord.app_commands.describe(volume="볼륨 값 (0-100)")
+    async def slash_volume(self, interaction: discord.Interaction, volume: int):
+        """Slash Command로 볼륨 설정"""
+        ctx = await self.bot.get_context(interaction)
+        await self.volume(ctx, volume)
+    
+    async def slash_queue(self, interaction: discord.Interaction):
+        """Slash Command로 대기열 표시"""
+        ctx = await self.bot.get_context(interaction)
+        await self.queue(ctx)
+    
+    @discord.app_commands.describe(page="페이지 번호 (기본값: 1)")
+    async def slash_history(self, interaction: discord.Interaction, page: int = 1):
+        """Slash Command로 히스토리 표시"""
+        ctx = await self.bot.get_context(interaction)
+        await self.show_history(ctx, page)
+    
+    @discord.app_commands.describe(index="히스토리 번호 (기본값: 1)")
+    async def slash_replay(self, interaction: discord.Interaction, index: int = 1):
+        """Slash Command로 히스토리에서 재생"""
+        ctx = await self.bot.get_context(interaction)
+        await self.replay_from_history(ctx, index)
+    
+    async def cog_load(self):
+        """Cog가 로드될 때 Slash Commands 등록"""
+        # 이미 등록된 명령어가 있으면 제거
+        try:
+            self.bot.tree.remove_command("음악")
+        except Exception:
+            pass
+        try:
+            self.bot.tree.remove_command("플레이리스트")
+        except Exception:
+            pass
+        try:
+            self.bot.tree.remove_command("히스토리")
+        except Exception:
+            pass
+        
+        # 그룹을 새로 생성하여 중복 방지
+        self.music_group = discord.app_commands.Group(name="음악", description="음악 재생 관련 명령어")
+        self.playlist_group = discord.app_commands.Group(name="플레이리스트", description="플레이리스트 관련 명령어")
+        self.history_group = discord.app_commands.Group(name="히스토리", description="재생 기록 관련 명령어")
+        
+        # 그룹에 명령어 추가
+        self.music_group.command(name="재생", description="YouTube URL 또는 검색어로 음악을 재생합니다")(self.slash_play)
+        self.music_group.command(name="정지", description="음악 재생을 종료합니다")(self.slash_stop)
+        self.music_group.command(name="볼륨", description="볼륨을 설정합니다 (0-100)")(self.slash_volume)
+        self.music_group.command(name="대기열", description="현재 재생 목록을 표시합니다")(self.slash_queue)
+        
+        self.history_group.command(name="히스토리", description="재생 기록을 보여줍니다")(self.slash_history)
+        self.history_group.command(name="다시재생", description="히스토리에서 노래를 다시 재생합니다")(self.slash_replay)
+        
+        # 봇에 그룹 등록 (override=True로 강제 덮어쓰기)
+        self.bot.tree.add_command(self.music_group, override=True)
+        self.bot.tree.add_command(self.playlist_group, override=True)
+        self.bot.tree.add_command(self.history_group, override=True)
+    
+    async def cog_unload(self):
+        """Cog가 언로드될 때 Slash Commands 제거"""
+        try:
+            if self.music_group:
+                self.bot.tree.remove_command(self.music_group.name)
+            if self.playlist_group:
+                self.bot.tree.remove_command(self.playlist_group.name)
+            if self.history_group:
+                self.bot.tree.remove_command(self.history_group.name)
+        except Exception as e:
+            logger.error(f"Slash Commands 제거 중 오류: {e}")
 
