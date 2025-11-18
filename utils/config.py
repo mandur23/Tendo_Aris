@@ -11,7 +11,7 @@ BASE_DIR = Path(__file__).parent.parent
 FFMPEG_PATH = os.getenv('FFMPEG_PATH', r'C:\Users\User\ffmpeg-2024-10-21-git-baa23e40c1-full_build\bin\ffmpeg.exe')
 
 # 봇 설정
-DISCORD_BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
+DISCORD_BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN', '').strip()
 COMMAND_PREFIX = '!'
 
 # 음악 플레이어 설정

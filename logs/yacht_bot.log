@@ -118,3 +118,34 @@ TypeError: expected string or bytes-like object, got 'NoneType'
 2025-11-16 22:19:02,976 - discord.client - WARNING - PyNaCl is not installed, voice will NOT be supported
 2025-11-16 22:19:06,434 - core.bot - INFO - 아리스가 준비 완료했어요! 텐노아리스#7448로 로그인했답니다~
 2025-11-16 22:27:52,322 - core.bot - INFO - 아리스가 준비 완료했어요! 텐노아리스#7448로 로그인했답니다~
+2025-11-18 09:58:05,245 - __main__ - ERROR - 봇 실행 중 오류 발생: Improper token has been passed.
+Traceback (most recent call last):
+  File "C:\Users\nano\PycharmProjects\Tendo_Aris\.venv\Lib\site-packages\discord\http.py", line 839, in static_login
+    data = await self.request(Route('GET', '/users/@me'))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nano\PycharmProjects\Tendo_Aris\.venv\Lib\site-packages\discord\http.py", line 773, in request
+    raise HTTPException(response, data)
+discord.errors.HTTPException: 401 Unauthorized (error code: 0): 401: Unauthorized
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\nano\PycharmProjects\Tendo_Aris\bot.py", line 37, in main
+    await bot.start(DISCORD_BOT_TOKEN)
+  File "C:\Users\nano\PycharmProjects\Tendo_Aris\.venv\Lib\site-packages\discord\client.py", line 846, in start
+    await self.login(token)
+  File "C:\Users\nano\PycharmProjects\Tendo_Aris\.venv\Lib\site-packages\discord\client.py", line 675, in login
+    data = await self.http.static_login(token)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\nano\PycharmProjects\Tendo_Aris\.venv\Lib\site-packages\discord\http.py", line 843, in static_login
+    raise LoginFailure('Improper token has been passed.') from exc
+discord.errors.LoginFailure: Improper token has been passed.
+2025-11-18 09:58:05,290 - __main__ - INFO - 봇이 정상적으로 종료되었습니다.
+2025-11-18 16:33:02,606 - dashboard.server - INFO - 대시보드 서버 시작: http://0.0.0.0:8000
+2025-11-18 16:33:05,919 - core.bot - INFO - 아리스가 준비 완료했어요! 텐노아리스#7448로 로그인했답니다~
+2025-11-18 16:33:45,021 - __main__ - INFO - 시그널 2을 받았습니다. 봇을 종료합니다.
+2025-11-18 16:33:45,218 - __main__ - INFO - 봇이 정상적으로 종료되었습니다.
+2025-11-18 16:38:56,441 - dashboard.server - INFO - 대시보드 서버 시작: http://0.0.0.0:8000
+2025-11-18 16:38:59,863 - core.bot - INFO - 아리스가 준비 완료했어요! 텐노아리스#7448로 로그인했답니다~
+2025-11-18 16:39:06,572 - __main__ - INFO - 시그널 2을 받았습니다. 봇을 종료합니다.
+2025-11-18 16:39:06,786 - __main__ - INFO - 봇이 정상적으로 종료되었습니다.

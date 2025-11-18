@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>시스템 대시보드</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin:0; padding:16px; }
+    h1 { font-size: 18px; font-weight: 700; margin: 0 0 12px; }
+    .grid { display:flex; flex-wrap:wrap; gap:12px; }
+    .card { width: 260px; border: 1px solid #e5e7eb; border-radius: 12px; padding: 12px; background: #fff0; }
+    .wrap { position: relative; height: 200px; }
+    .center { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font: 600 18px/1 sans-serif; }
+    .label { margin-top: 6px; text-align: center; font-size: 14px; }
+    .badges { margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap; }
+    .badge { display: inline-block; padding: 4px 8px; border-radius: 999px; font-size: 12px; background: #e5e7eb; color: #111827; }
+    .warn { background: #fee2e2; color: #b91c1c; }
+    .muted { opacity: .7; }
+  </style>
+  <noscript>이 대시보드는 자바스크립트가 필요합니다.</noscript>
+  <script>
+    function mk(label){
+      return {type:'doughnut', data:{labels:[label,'남음'], datasets:[{data:[0,100], backgroundColor:['#10b981','#e5e7eb'], borderWidth:0}]}, options:{cutout:'70%', plugins:{legend:{display:false}}}};
+    }
+    function set(chart, el, v){ v = Math.max(0, Math.min(100, Math.round(v||0))); chart.data.datasets[0].data=[v,100-v]; chart.data.datasets[0].backgroundColor=[v>=90?'#ef4444':(v>=80?'#f59e0b':'#10b981'),'#e5e7eb']; chart.update('none'); el.textContent=v+'%'; }
+    function badge(el, label, val, unit, warn){ el.textContent = `${label}: ${val!=null?val+' '+unit:'-'}`; el.className = 'badge' + (warn?' warn':''); }
+
+    let charts = {};
+    function init(){
+      charts.cpu = new Chart(document.getElementById('cpu').getContext('2d'), mk('사용'));
+      charts.ram = new Chart(document.getElementById('ram').getContext('2d'), mk('사용'));
+      charts.gpu = new Chart(document.getElementById('gpu').getContext('2d'), mk('사용'));
+      charts.vram = new Chart(document.getElementById('vram').getContext('2d'), mk('사용'));
+      poll();
+    }
+
+    async function poll(){
+      try{
+        const r = await fetch('/api/summary');
+        const d = await r.json();
+        set(charts.cpu, document.getElementById('cpuC'), d.cpu?.percent||0);
+        set(charts.ram, document.getElementById('ramC'), d.ram?.percent||0);
+
+        const gpuCard = document.getElementById('gpuCard');
+        const vramCard = document.getElementById('vramCard');
+        const g = (d.gpu && d.gpu[0]) || null;
+        if(!g){
+          // GPU 미탐지 시 카드 비활성화 안내
+          gpuCard.querySelector('.label').textContent = 'GPU 사용률 (장치 없음)';
+          vramCard.querySelector('.label').textContent = 'VRAM 사용률 (장치 없음)';
+          document.getElementById('gpuTemp').className = 'badge muted';
+          document.getElementById('gpuPower').className = 'badge muted';
+          set(charts.gpu, document.getElementById('gpuC'), 0);
+          set(charts.vram, document.getElementById('vramC'), 0);
+        } else {
+          set(charts.gpu, document.getElementById('gpuC'), g.util||0);
+          set(charts.vram, document.getElementById('vramC'), g.vram_percent||0);
+          const t = g.temp; const p = g.power;
+          badge(document.getElementById('gpuTemp'), 'Temp', t, '°C', t!=null && t>=85);
+          badge(document.getElementById('gpuPower'), 'Power', p, 'W', false);
+          gpuCard.querySelector('.label').textContent = `GPU 사용률${g.brand?(' - '+g.brand):''}`;
+          vramCard.querySelector('.label').textContent = 'VRAM 사용률';
+        }
+      }catch(e){
+        console.error(e);
+      } finally {
+        setTimeout(poll, 1000);
+      }
+    }
+    window.addEventListener('DOMContentLoaded', init);
+  </script>
+  </head>
+<body>
+  <h1>시스템 대시보드</h1>
+  <div class="grid">
+    <div class="card"><div class="wrap"><canvas id="cpu"></canvas><div id="cpuC" class="center">0%</div></div><div class="label">CPU 사용률</div></div>
+    <div class="card"><div class="wrap"><canvas id="ram"></canvas><div id="ramC" class="center">0%</div></div><div class="label">RAM 사용률</div></div>
+    <div id="gpuCard" class="card"><div class="wrap"><canvas id="gpu"></canvas><div id="gpuC" class="center">0%</div></div><div class="label">GPU 사용률</div><div class="badges"><span id="gpuTemp" class="badge">Temp: -</span><span id="gpuPower" class="badge">Power: -</span></div></div>
+    <div id="vramCard" class="card"><div class="wrap"><canvas id="vram"></canvas><div id="vramC" class="center">0%</div></div><div class="label">VRAM 사용률</div></div>
+  </div>
+</body>
+</html>

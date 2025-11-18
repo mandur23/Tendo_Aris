@@ -272,3 +272,108 @@ def handle_extract_error(error: Exception, max_retries: int = 3, attempt: int = 
             return "❓ 알 수 없는 영상"
         return None  # 재시도 가능
 
+
+class AuthorLockedView(discord.ui.View):
+    """
+    생성자에게만 조작을 허용하는 View 베이스 클래스.
+    타임아웃 시 자동으로 버튼을 비활성화합니다.
+    """
+    def __init__(self, author_id: int, timeout: float = 30.0):
+        super().__init__(timeout=timeout)
+        self.author_id = author_id
+    
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """인터랙션을 생성한 사용자만 허용합니다."""
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "선생님, 다른 사람의 명령을 조작할 수 없어요!",
+                ephemeral=True,
+                delete_after=5
+            )
+            return False
+        return True
+    
+    async def on_timeout(self):
+        """타임아웃 시 모든 버튼을 비활성화합니다."""
+        for item in self.children:
+            item.disabled = True
+        try:
+            if hasattr(self, 'message') and self.message:
+                await safe_edit_message(self.message, view=self)
+        except Exception as e:
+            logger.debug(f"View 타임아웃 처리 중 오류: {e}")
+
+
+class ConfirmView(AuthorLockedView):
+    """
+    2단계 확인을 위한 View 클래스.
+    확인/취소 버튼을 제공하며, 타임아웃 시 자동 비활성화됩니다.
+    """
+    def __init__(
+        self,
+        author_id: int,
+        confirm_label: str = "확인",
+        cancel_label: str = "취소",
+        confirm_style: discord.ButtonStyle = discord.ButtonStyle.danger,
+        cancel_style: discord.ButtonStyle = discord.ButtonStyle.secondary,
+        timeout: float = 30.0,
+        on_confirm: callable = None,
+        on_cancel: callable = None
+    ):
+        super().__init__(author_id, timeout=timeout)
+        self.on_confirm_callback = on_confirm
+        self.on_cancel_callback = on_cancel
+        
+        self.confirm_button = discord.ui.Button(
+            label=confirm_label,
+            style=confirm_style
+        )
+        self.confirm_button.callback = self._confirm_callback
+        self.add_item(self.confirm_button)
+        
+        self.cancel_button = discord.ui.Button(
+            label=cancel_label,
+            style=cancel_style
+        )
+        self.cancel_button.callback = self._cancel_callback
+        self.add_item(self.cancel_button)
+    
+    async def _confirm_callback(self, interaction: discord.Interaction):
+        """확인 버튼 콜백"""
+        if not await self.interaction_check(interaction):
+            return
+        
+        # 모든 버튼 비활성화
+        for item in self.children:
+            item.disabled = True
+        
+        try:
+            await interaction.response.edit_message(view=self)
+        except Exception as e:
+            logger.debug(f"확인 버튼 처리 중 오류: {e}")
+        
+        if self.on_confirm_callback:
+            try:
+                await self.on_confirm_callback(interaction)
+            except Exception as e:
+                logger.error(f"확인 콜백 실행 중 오류: {e}")
+    
+    async def _cancel_callback(self, interaction: discord.Interaction):
+        """취소 버튼 콜백"""
+        if not await self.interaction_check(interaction):
+            return
+        
+        # 모든 버튼 비활성화
+        for item in self.children:
+            item.disabled = True
+        
+        try:
+            await interaction.response.edit_message(view=self)
+        except Exception as e:
+            logger.debug(f"취소 버튼 처리 중 오류: {e}")
+        
+        if self.on_cancel_callback:
+            try:
+                await self.on_cancel_callback(interaction)
+            except Exception as e:
+                logger.error(f"취소 콜백 실행 중 오류: {e}")

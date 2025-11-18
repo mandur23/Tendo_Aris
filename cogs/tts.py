@@ -274,7 +274,7 @@ class TTS(commands.Cog):
 
         # 텍스트가 있으면 즉시 읽기
         if len(text) > 200:
-            await ctx.send("선생님, 텍스트가 너무 길어요! 200자 이하로 입력해주세요~", delete_after=10)
+            await ctx.send("선생님, 텍스트가 너무 길어요! 200자 이하로 입력해주세요~", delete_after=12)
             await self.delete_command_message(ctx)
             return
 
@@ -293,7 +293,7 @@ class TTS(commands.Cog):
             if success:
                 await ctx.send(f"선생님, '{text[:50]}{'...' if len(text) > 50 else ''}'을(를) 읽어드릴게요!", delete_after=10)
             else:
-                await ctx.send("선생님, TTS 생성 중 오류가 발생했어요!", delete_after=10)
+                await ctx.send("선생님, TTS 생성 중 오류가 발생했어요!", delete_after=12)
             
             await self.delete_command_message(ctx)
 
@@ -367,7 +367,7 @@ class TTS(commands.Cog):
             # COQUI_MODELS 업데이트 확인
             from utils.tts_utils import COQUI_MODELS as _models
             if current_lang not in _models:
-                await ctx.send(f"선생님, '{current_lang}' 언어는 Coqui TTS에서 지원되지 않아요!", delete_after=10)
+                await ctx.send(f"선생님, '{current_lang}' 언어는 Coqui TTS에서 지원되지 않아요!", delete_after=12)
                 await self.delete_command_message(ctx)
                 return
             
@@ -453,7 +453,7 @@ class TTS(commands.Cog):
         # gTTS를 사용하는 경우
         else:
             if current_lang not in VOICE_MODELS:
-                await ctx.send(f"선생님, '{current_lang}' 언어는 지원되지 않아요!", delete_after=10)
+                await ctx.send(f"선생님, '{current_lang}' 언어는 지원되지 않아요!", delete_after=12)
                 await self.delete_command_message(ctx)
                 return
             

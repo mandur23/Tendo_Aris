@@ -1,5 +1,7 @@
 import json
 import logging
+import os
+import tempfile
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -8,6 +10,40 @@ HISTORY_FILE = 'history.json'
 PLAYLISTS_FILE = 'playlists.json'
 TTS_SETTINGS_FILE = 'tts_settings.json'
 LOGS_DIR = Path('logs')
+
+
+def atomic_write_json(path, data):
+    """원자적 JSON 파일 쓰기 (임시 파일 사용 후 교체)"""
+    dir_path = os.path.dirname(path) or "."
+    fd = None
+    tmp_path = None
+    try:
+        # 임시 파일 생성
+        fd, tmp_path = tempfile.mkstemp(dir=dir_path, prefix=".tmp_", suffix=".json")
+        
+        # 임시 파일에 쓰기
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+        
+        # 원자적 교체
+        os.replace(tmp_path, path)
+        fd = None  # 성공 시 fd는 이미 닫힘
+        tmp_path = None
+    except Exception as e:
+        logger.error(f"원자적 쓰기 실패 ({path}): {e}")
+        raise
+    finally:
+        # 정리: 실패 시 임시 파일 삭제
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if tmp_path is not None and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
 
 def load_history():
@@ -20,17 +56,24 @@ def load_history():
             return json.loads(content)
     except FileNotFoundError:
         return {}
-    except json.JSONDecodeError:
-        logger.warning("히스토리 파일이 손상되었습니다. 새로운 히스토리를 시작합니다.")
+    except json.JSONDecodeError as e:
+        logger.warning(f"히스토리 파일이 손상되었습니다. 새로운 히스토리를 시작합니다: {e}")
+        # 백업 시도
+        backup_path = f"{HISTORY_FILE}.backup"
+        if os.path.exists(HISTORY_FILE):
+            try:
+                os.rename(HISTORY_FILE, backup_path)
+                logger.info(f"손상된 파일을 {backup_path}로 백업했습니다.")
+            except OSError:
+                pass
         return {}
 
 
 def save_history(history):
-    """히스토리를 파일에 저장합니다."""
+    """히스토리를 파일에 원자적으로 저장합니다."""
     try:
-        with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
-            json.dump(history, f, ensure_ascii=False, indent=4)
-    except IOError as e:
+        atomic_write_json(HISTORY_FILE, history)
+    except Exception as e:
         logger.error(f"히스토리를 저장하는 중 오류가 발생했습니다: {e}")
 
 
@@ -44,17 +87,24 @@ def load_playlists():
             return json.loads(content)
     except FileNotFoundError:
         return {}
-    except json.JSONDecodeError:
-        logger.warning("플레이리스트 파일이 손상되었습니다. 새로운 플레이리스트를 시작합니다.")
+    except json.JSONDecodeError as e:
+        logger.warning(f"플레이리스트 파일이 손상되었습니다. 새로운 플레이리스트를 시작합니다: {e}")
+        # 백업 시도
+        backup_path = f"{PLAYLISTS_FILE}.backup"
+        if os.path.exists(PLAYLISTS_FILE):
+            try:
+                os.rename(PLAYLISTS_FILE, backup_path)
+                logger.info(f"손상된 파일을 {backup_path}로 백업했습니다.")
+            except OSError:
+                pass
         return {}
 
 
 def save_playlists(playlists):
-    """플레이리스트를 파일에 저장합니다."""
+    """플레이리스트를 파일에 원자적으로 저장합니다."""
     try:
-        with open(PLAYLISTS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(playlists, f, ensure_ascii=False, indent=4)
-    except IOError as e:
+        atomic_write_json(PLAYLISTS_FILE, playlists)
+    except Exception as e:
         logger.error(f"플레이리스트를 저장하는 중 오류가 발생했습니다: {e}")
 
 
@@ -68,17 +118,24 @@ def load_tts_settings():
             return json.loads(content)
     except FileNotFoundError:
         return {}
-    except json.JSONDecodeError:
-        logger.warning("TTS 설정 파일이 손상되었습니다. 새로운 설정을 시작합니다.")
+    except json.JSONDecodeError as e:
+        logger.warning(f"TTS 설정 파일이 손상되었습니다. 새로운 설정을 시작합니다: {e}")
+        # 백업 시도
+        backup_path = f"{TTS_SETTINGS_FILE}.backup"
+        if os.path.exists(TTS_SETTINGS_FILE):
+            try:
+                os.rename(TTS_SETTINGS_FILE, backup_path)
+                logger.info(f"손상된 파일을 {backup_path}로 백업했습니다.")
+            except OSError:
+                pass
         return {}
 
 
 def save_tts_settings(tts_settings):
-    """TTS 설정을 파일에 저장합니다."""
+    """TTS 설정을 파일에 원자적으로 저장합니다."""
     try:
-        with open(TTS_SETTINGS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(tts_settings, f, ensure_ascii=False, indent=4)
-    except IOError as e:
+        atomic_write_json(TTS_SETTINGS_FILE, tts_settings)
+    except Exception as e:
         logger.error(f"TTS 설정을 저장하는 중 오류가 발생했습니다: {e}")
 
 
