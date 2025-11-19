@@ -257,7 +257,9 @@ Tendo_Aris/
 │   └── ytdl_utils.py           # YouTube 다운로더 유틸리티
 │
 ├── logs/                       # 로그 파일 디렉토리
-│   └── yacht_bot.log           # 봇 로그 파일
+│   ├── YYYY/                   # 년도별 폴더 (예: 2025)
+│   │   └── MM/                 # 월별 폴더 (예: 11)
+│   │       └── yacht_bot_YYYY-MM-DD.log  # 날짜별 로그 파일
 │
 ├── playlists.json              # 플레이리스트 데이터 (JSON 모드, 자동 생성)
 ├── history.json                # 재생 기록 데이터 (JSON 모드, 자동 생성)
@@ -326,8 +328,11 @@ USE_MYSQL = False                 # MySQL 사용 여부 (True면 MySQL, False면
 ### 로깅 설정 (`logging_config.py`)
 
 - **로그 레벨**: INFO
-- **로그 파일**: `logs/yacht_bot.log`
-- **로그 회전**: 10MB마다 새 파일 생성, 최대 5개 백업 파일
+- **로그 파일 구조**: 날짜별로 자동 분리
+  - 경로: `logs/YYYY/MM/yacht_bot_YYYY-MM-DD.log`
+  - 예시: `logs/2025/11/yacht_bot_2025-11-19.log`
+- **자동 롤오버**: 날짜가 변경되면 자동으로 새 파일 생성
+- **폴더 구조**: 년도/월 폴더로 자동 정리
 
 ## 🛠️ 문제 해결
 
@@ -366,14 +371,17 @@ USE_MYSQL = False                 # MySQL 사용 여부 (True면 MySQL, False면
 ### 로그 확인
 
 ```bash
-# 로그 파일 위치
-logs/yacht_bot.log
+# 로그 파일 위치 (날짜별로 자동 생성)
+logs/YYYY/MM/yacht_bot_YYYY-MM-DD.log
+# 예시: logs/2025/11/yacht_bot_2025-11-19.log
 
 # 실시간 로그 확인 (Linux/Mac)
-tail -f logs/yacht_bot.log
+tail -f logs/$(date +%Y)/$(date +%m)/yacht_bot_$(date +%Y-%m-%d).log
 
 # 실시간 로그 확인 (Windows PowerShell)
-Get-Content logs/yacht_bot.log -Wait
+# 먼저 현재 날짜의 로그 파일 경로 확인
+Get-Content logs/2025/11/yacht_bot_2025-11-19.log -Wait
+# 또는 날짜별로 직접 경로 지정
 ```
 
 ## 🎯 주요 특징
