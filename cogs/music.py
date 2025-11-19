@@ -39,13 +39,44 @@ class Music(commands.Cog):
         if USE_MYSQL:
             try:
                 await init_db_pool()
-                # 비동기로 데이터 로드
-                self.history = await load_history_from_db()
-                self.playlists = await load_playlists_from_db()
-                logger.info("MySQL에서 히스토리와 플레이리스트를 로드했습니다.")
+                # 비동기로 데이터 로드 (데이터베이스 우선)
+                db_history = await load_history_from_db()
+                db_playlists = await load_playlists_from_db()
+                
+                # 데이터베이스에 데이터가 없으면 JSON 파일에서 fallback (데이터베이스 우선)
+                if not db_history:
+                    logger.info("데이터베이스에 히스토리가 없습니다. JSON 파일에서 로드합니다.")
+                    from utils.file_utils import load_history_from_json_file
+                    json_history = load_history_from_json_file()
+                    if json_history:
+                        self.history = json_history
+                        logger.info(f"JSON 파일에서 히스토리 {sum(len(items) for items in json_history.values())}개 항목 로드")
+                    else:
+                        self.history = {}
+                else:
+                    self.history = db_history
+                    logger.info(f"MySQL에서 히스토리 {sum(len(items) for items in db_history.values())}개 항목 로드")
+                
+                if not db_playlists:
+                    logger.info("데이터베이스에 플레이리스트가 없습니다. JSON 파일에서 로드합니다.")
+                    from utils.file_utils import load_playlists_from_json_file
+                    json_playlists = load_playlists_from_json_file()
+                    if json_playlists:
+                        self.playlists = json_playlists
+                        logger.info(f"JSON 파일에서 플레이리스트 로드")
+                    else:
+                        self.playlists = {}
+                else:
+                    self.playlists = db_playlists
+                    logger.info("MySQL에서 플레이리스트 로드")
+                    
             except Exception as e:
                 logger.error(f"MySQL 초기화 실패: {e}")
                 logger.warning("JSON 파일 사용 모드로 전환합니다.")
+                # MySQL 실패 시 JSON 파일에서 로드
+                from utils.file_utils import load_history_from_json_file, load_playlists_from_json_file
+                self.history = load_history_from_json_file()
+                self.playlists = load_playlists_from_json_file()
 
     async def cog_unload(self):
         """Cog가 언로드될 때 실행됩니다."""

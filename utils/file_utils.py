@@ -47,11 +47,8 @@ def atomic_write_json(path, data):
                 pass
 
 
-def load_history():
-    """히스토리를 로드합니다. (MySQL 사용 시 비동기 함수 사용 필요)"""
-    if USE_MYSQL:
-        logger.warning("MySQL이 활성화되어 있습니다. load_history_from_db()를 사용하세요.")
-        return {}
+def load_history_from_json_file():
+    """JSON 파일에서 히스토리를 직접 로드합니다. (fallback용)"""
     try:
         with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
             content = f.read()
@@ -73,6 +70,14 @@ def load_history():
         return {}
 
 
+def load_history():
+    """히스토리를 로드합니다. (MySQL 사용 시 비동기 함수 사용 필요)"""
+    if USE_MYSQL:
+        logger.warning("MySQL이 활성화되어 있습니다. load_history_from_db()를 사용하세요.")
+        return {}
+    return load_history_from_json_file()
+
+
 def save_history(history):
     """히스토리를 저장합니다. (MySQL 사용 시 비동기 함수 사용 필요)"""
     if USE_MYSQL:
@@ -84,11 +89,8 @@ def save_history(history):
         logger.error(f"히스토리를 저장하는 중 오류가 발생했습니다: {e}")
 
 
-def load_playlists():
-    """플레이리스트를 로드합니다. (MySQL 사용 시 비동기 함수 사용 필요)"""
-    if USE_MYSQL:
-        logger.warning("MySQL이 활성화되어 있습니다. load_playlists_from_db()를 사용하세요.")
-        return {}
+def load_playlists_from_json_file():
+    """JSON 파일에서 플레이리스트를 직접 로드합니다. (fallback용)"""
     try:
         with open(PLAYLISTS_FILE, 'r', encoding='utf-8') as f:
             content = f.read()
@@ -108,6 +110,14 @@ def load_playlists():
             except OSError:
                 pass
         return {}
+
+
+def load_playlists():
+    """플레이리스트를 로드합니다. (MySQL 사용 시 비동기 함수 사용 필요)"""
+    if USE_MYSQL:
+        logger.warning("MySQL이 활성화되어 있습니다. load_playlists_from_db()를 사용하세요.")
+        return {}
+    return load_playlists_from_json_file()
 
 
 def save_playlists(playlists):
