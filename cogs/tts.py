@@ -74,7 +74,19 @@ class TTS(commands.Cog):
 
     async def play_tts(self, ctx, text: str, lang: str = 'ko', voice_model: str = '기본', slow: bool = False, use_coqui: bool = False, coqui_model: str = None):
         """TTS를 재생합니다."""
+        tts_file = None
         try:
+            # 텍스트 유효성 검사
+            if not text or not text.strip():
+                logger.warning("빈 텍스트는 TTS로 변환할 수 없습니다.")
+                return False
+            
+            # 텍스트 길이 검사
+            text = text.strip()
+            if len(text) > 200:
+                logger.warning(f"텍스트가 너무 깁니다 ({len(text)}자). 최대 200자까지 지원됩니다.")
+                return False
+            
             # voice_client 확인
             if not ctx.voice_client:
                 logger.error("voice_client가 없습니다. 음성 채널에 연결되어 있지 않습니다.")
@@ -120,18 +132,44 @@ class TTS(commands.Cog):
             
             # FFmpeg 경로 설정
             source = discord.FFmpegPCMAudio(str(tts_file), executable=FFMPEG_PATH)
-            ctx.voice_client.play(
-                source,
-                after=lambda e: asyncio.run_coroutine_threadsafe(
-                    self._cleanup_after_play(tts_file, ctx),
-                    self.bot.loop
-                ) if e is None else logger.error(f"TTS 재생 오류: {e}")
-            )
+            
+            def after_play(error):
+                """재생 완료 후 콜백"""
+                if error:
+                    logger.error(f"TTS 재생 오류: {error}")
+                    # 재생 실패 시에도 파일 정리 및 대기열 처리
+                    if tts_file:
+                        cleanup_tts_file(tts_file)
+                    # 비동기로 대기열 처리
+                    asyncio.run_coroutine_threadsafe(
+                        self._handle_playback_error(ctx),
+                        self.bot.loop
+                    )
+                else:
+                    # 재생 성공 시 정상 처리
+                    asyncio.run_coroutine_threadsafe(
+                        self._cleanup_after_play(tts_file, ctx),
+                        self.bot.loop
+                    )
+            
+            ctx.voice_client.play(source, after=after_play)
             
             return True
         except Exception as e:
             logger.error(f"TTS 재생 오류: {e}", exc_info=True)
+            # 예외 발생 시 생성된 파일 정리
+            if tts_file:
+                cleanup_tts_file(tts_file)
             return False
+    
+    async def _handle_playback_error(self, ctx):
+        """재생 오류 발생 시 처리"""
+        # 재생 플래그 해제
+        self.playing[ctx.guild.id] = False
+        
+        # 대기열 처리 (다음 항목 재생 시도)
+        if ctx.guild.id in self.tts_queue and self.tts_queue[ctx.guild.id]:
+            await self._process_queue(ctx.guild)
 
     async def delete_command_message(self, ctx):
         """명령어 메시지를 삭제합니다."""
@@ -158,48 +196,70 @@ class TTS(commands.Cog):
         await asyncio.sleep(1)  # 재생 완료 대기
         cleanup_tts_file(file_path)
         
-        # 대기열 처리
+        # 재생 플래그 해제
+        self.playing[ctx.guild.id] = False
+        
+        # 대기열 처리 (재생 완료 후 다음 항목 재생)
         if ctx.guild.id in self.tts_queue and self.tts_queue[ctx.guild.id]:
-            self.playing[ctx.guild.id] = False
             await self._process_queue(ctx.guild)
 
     async def _process_queue(self, guild):
         """TTS 대기열을 처리합니다."""
-        if guild.id not in self.tts_queue or not self.tts_queue[guild.id]:
-            return
-        
+        # 재생 중이면 대기
         if self.playing.get(guild.id, False):
             return
         
+        # voice_client 확인
         if not guild.voice_client:
             self.tts_queue[guild.id] = []
             self.playing[guild.id] = False
             return
         
-        user_id, text, settings = self.tts_queue[guild.id].pop(0)
-        self.playing[guild.id] = True
-        
-        # 임시 context 생성 (재생용)
-        class TempContext:
-            def __init__(self, guild, voice_client, bot):
-                self.guild = guild
-                self.voice_client = voice_client
-                self.bot = bot
-        
-        temp_ctx = TempContext(guild, guild.voice_client, self.bot)
-        success = await self.play_tts(
-            temp_ctx,
-            text,
-            settings.get('lang', 'ko'),
-            settings.get('voice_model', '기본'),
-            settings.get('slow', False),
-            settings.get('use_coqui', False),
-            settings.get('coqui_model', None)
-        )
-        
-        # 재생 실패 시 플래그 해제
-        if not success:
+        # 대기열이 비어있으면 종료
+        if guild.id not in self.tts_queue or not self.tts_queue[guild.id]:
             self.playing[guild.id] = False
+            return
+        
+        # 대기열에서 항목 가져오기 (빈 텍스트 필터링)
+        while self.tts_queue[guild.id]:
+            user_id, text, settings = self.tts_queue[guild.id].pop(0)
+            
+            # 텍스트 유효성 검사
+            if not text or not text.strip() or len(text.strip()) > 200:
+                logger.debug(f"유효하지 않은 텍스트 건너뛰기: '{text[:50]}...'")
+                continue
+            
+            # 재생 플래그 설정
+            self.playing[guild.id] = True
+            
+            # 임시 context 생성 (재생용)
+            class TempContext:
+                def __init__(self, guild, voice_client, bot):
+                    self.guild = guild
+                    self.voice_client = voice_client
+                    self.bot = bot
+            
+            temp_ctx = TempContext(guild, guild.voice_client, self.bot)
+            success = await self.play_tts(
+                temp_ctx,
+                text.strip(),
+                settings.get('lang', 'ko'),
+                settings.get('voice_model', '기본'),
+                settings.get('slow', False),
+                settings.get('use_coqui', False),
+                settings.get('coqui_model', None)
+            )
+            
+            # 재생 성공 시 종료 (재생 완료 후 _cleanup_after_play에서 다음 항목 처리)
+            if success:
+                return
+            
+            # 재생 실패 시 플래그 해제하고 다음 항목 시도
+            self.playing[guild.id] = False
+            logger.warning(f"TTS 재생 실패, 대기열의 다음 항목 처리 시도")
+        
+        # 모든 항목을 처리했거나 유효한 항목이 없으면 플래그 해제
+        self.playing[guild.id] = False
 
     @commands.Cog.listener()
     async def on_message(self, message):
