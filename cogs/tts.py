@@ -6,7 +6,7 @@ from discord.ext import commands
 from pathlib import Path
 from utils.tts_utils import text_to_speech, cleanup_tts_file, VOICE_MODELS, COQUI_AVAILABLE, COQUI_MODELS, _lazy_import_coqui
 from utils.file_utils import load_tts_settings, save_tts_settings
-from utils.config import COMMAND_MESSAGE_DELETE_DELAY
+from utils.config import COMMAND_MESSAGE_DELETE_DELAY, FFMPEG_PATH
 
 # Coqui TTS 지원 확인 (lazy import)
 list_available_models = None
@@ -75,6 +75,11 @@ class TTS(commands.Cog):
     async def play_tts(self, ctx, text: str, lang: str = 'ko', voice_model: str = '기본', slow: bool = False, use_coqui: bool = False, coqui_model: str = None):
         """TTS를 재생합니다."""
         try:
+            # voice_client 확인
+            if not ctx.voice_client:
+                logger.error("voice_client가 없습니다. 음성 채널에 연결되어 있지 않습니다.")
+                return False
+            
             # Coqui TTS 사용
             if use_coqui:
                 _lazy_import_coqui()
@@ -113,7 +118,8 @@ class TTS(commands.Cog):
             if ctx.voice_client.is_playing():
                 ctx.voice_client.stop()
             
-            source = discord.FFmpegPCMAudio(str(tts_file))
+            # FFmpeg 경로 설정
+            source = discord.FFmpegPCMAudio(str(tts_file), executable=FFMPEG_PATH)
             ctx.voice_client.play(
                 source,
                 after=lambda e: asyncio.run_coroutine_threadsafe(
@@ -124,7 +130,7 @@ class TTS(commands.Cog):
             
             return True
         except Exception as e:
-            logger.error(f"TTS 재생 오류: {e}")
+            logger.error(f"TTS 재생 오류: {e}", exc_info=True)
             return False
 
     async def delete_command_message(self, ctx):
@@ -167,6 +173,7 @@ class TTS(commands.Cog):
         
         if not guild.voice_client:
             self.tts_queue[guild.id] = []
+            self.playing[guild.id] = False
             return
         
         user_id, text, settings = self.tts_queue[guild.id].pop(0)
@@ -174,12 +181,13 @@ class TTS(commands.Cog):
         
         # 임시 context 생성 (재생용)
         class TempContext:
-            def __init__(self, guild, voice_client):
+            def __init__(self, guild, voice_client, bot):
                 self.guild = guild
                 self.voice_client = voice_client
+                self.bot = bot
         
-        temp_ctx = TempContext(guild, guild.voice_client)
-        await self.play_tts(
+        temp_ctx = TempContext(guild, guild.voice_client, self.bot)
+        success = await self.play_tts(
             temp_ctx,
             text,
             settings.get('lang', 'ko'),
@@ -188,6 +196,10 @@ class TTS(commands.Cog):
             settings.get('use_coqui', False),
             settings.get('coqui_model', None)
         )
+        
+        # 재생 실패 시 플래그 해제
+        if not success:
+            self.playing[guild.id] = False
 
     @commands.Cog.listener()
     async def on_message(self, message):
@@ -222,6 +234,10 @@ class TTS(commands.Cog):
             if message.author.voice:
                 try:
                     await message.author.voice.channel.connect()
+                    # 연결 후 재확인
+                    if not message.guild.voice_client:
+                        logger.error("음성 채널 연결 후에도 voice_client가 없습니다.")
+                        return
                 except Exception as e:
                     logger.error(f"음성 채널 연결 실패: {e}")
                     return
