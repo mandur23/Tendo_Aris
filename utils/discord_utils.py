@@ -215,9 +215,13 @@ async def retry_on_403_error(func, *args, max_retries: int = 3, base_delay: floa
     for attempt in range(max_retries):
         try:
             if asyncio.iscoroutinefunction(func):
-                return await func(*args, **kwargs)
+                result = await func(*args, **kwargs)
             else:
-                return func(*args, **kwargs)
+                result = func(*args, **kwargs)
+                # run_in_executor처럼 Future 객체를 반환하는 경우 await
+                if isinstance(result, asyncio.Future):
+                    result = await result
+            return result
         except Exception as e:
             last_exception = e
             error_msg = str(e).lower()

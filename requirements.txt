@@ -7,6 +7,7 @@ gtts>=2.5.0
 PyNaCl>=1.6.0  # Discord 음성 지원을 위한 필수 패키지
 aiomysql>=0.2.0  # MySQL 비동기 연결
 PyMySQL>=1.1.0  # MySQL 드라이버
+cryptography>=41.0.0  # MySQL sha256_password/caching_sha2_password 인증을 위한 필수 패키지
 # TTS>=0.20.0  # Coqui TTS (optional, not supported on Python 3.12)
 # TTS package is not available for Python 3.12
 # Coqui TTS는 Python >=3.9.0,<3.12 버전만 지원합니다
