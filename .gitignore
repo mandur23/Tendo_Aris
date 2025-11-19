@@ -38,6 +38,11 @@ wheels/
 *.log
 logs/
 
+# 임시 파일
+*.tmp
+*.tmp_*
+.tmp_*
+
 # OS
 .DS_Store
 Thumbs.db

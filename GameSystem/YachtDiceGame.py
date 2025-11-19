@@ -30,7 +30,13 @@ class RecordView(discord.ui.View):
 
         game = self.cog.games.get(channel_id)
         if not game:
+            logger.warning(f"RecordView 초기화 시 게임을 찾을 수 없음: channel_id={channel_id}")
             return
+        
+        if not available_categories:
+            logger.warning(f"RecordView 초기화 시 사용 가능한 카테고리가 없음: channel_id={channel_id}, user={user.id}")
+            return
+            
         dice = game['dice']
 
         for cat in available_categories:
@@ -44,7 +50,10 @@ class RecordView(discord.ui.View):
 
             async def _cat_cb(interaction: discord.Interaction, category, score):
                 if interaction.user.id != self.user.id:
-                    await interaction.response.send_message("이 카테고리는 당신이 선택할 수 없습니다.", ephemeral=True)
+                    if not interaction.response.is_done():
+                        await interaction.response.send_message("이 카테고리는 당신이 선택할 수 없습니다.", ephemeral=True)
+                    else:
+                        await interaction.followup.send("이 카테고리는 당신이 선택할 수 없습니다.", ephemeral=True)
                     return
 
                 lock = self.cog.locks.get(self.channel_id)
@@ -55,16 +64,25 @@ class RecordView(discord.ui.View):
                 async with lock:
                     game = self.cog.games.get(self.channel_id)
                     if not game:
-                        await interaction.response.send_message("게임 정보를 찾을 수 없습니다.", ephemeral=True)
+                        if not interaction.response.is_done():
+                            await interaction.response.send_message("게임 정보를 찾을 수 없습니다.", ephemeral=True)
+                        else:
+                            await interaction.followup.send("게임 정보를 찾을 수 없습니다.", ephemeral=True)
                         return
 
                     current_player_id = game['players'][game['current_player']]
                     if interaction.user.id != current_player_id:
-                        await interaction.response.send_message("지금은 당신의 턴이 아닙니다.", ephemeral=True)
+                        if not interaction.response.is_done():
+                            await interaction.response.send_message("지금은 당신의 턴이 아닙니다.", ephemeral=True)
+                        else:
+                            await interaction.followup.send("지금은 당신의 턴이 아닙니다.", ephemeral=True)
                         return
 
                     if game['scores'].get(self.user.id, {}).get(category) is not None:
-                        await interaction.response.send_message("이미 이 카테고리에 점수가 기록되어 있습니다.", ephemeral=True)
+                        if not interaction.response.is_done():
+                            await interaction.response.send_message("이미 이 카테고리에 점수가 기록되어 있습니다.", ephemeral=True)
+                        else:
+                            await interaction.followup.send("이미 이 카테고리에 점수가 기록되어 있습니다.", ephemeral=True)
                         return
 
                     game['scores'][self.user.id][category] = score
@@ -79,10 +97,16 @@ class RecordView(discord.ui.View):
 
                 kr = self.category_names.get(category, category)
                 try:
-                    await interaction.response.edit_message(content=f"`{kr}`에 **{score}점** 기록했습니다! 점수 기록 창이 닫힙니다.", embed=None, view=self)
+                    if not interaction.response.is_done():
+                        await interaction.response.edit_message(content=f"`{kr}`에 **{score}점** 기록했습니다! 점수 기록 창이 닫힙니다.", embed=None, view=self)
+                    else:
+                        await interaction.followup.send(f"`{kr}`에 **{score}점** 기록했습니다!", ephemeral=True)
                 except discord.HTTPException:
                     try:
-                        await interaction.followup.send(f"`{kr}`에 **{score}점** 기록했습니다!", ephemeral=True)
+                        if not interaction.response.is_done():
+                            await interaction.response.send_message(f"`{kr}`에 **{score}점** 기록했습니다!", ephemeral=True)
+                        else:
+                            await interaction.followup.send(f"`{kr}`에 **{score}점** 기록했습니다!", ephemeral=True)
                     except Exception:
                         logger.exception("후속 응답 실패")
 
@@ -102,24 +126,36 @@ class RecordView(discord.ui.View):
 
         async def _cancel_cb(interaction: discord.Interaction):
             if interaction.user.id != self.user.id:
-                await interaction.response.send_message("취소할 권한이 없습니다.", ephemeral=True)
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("취소할 권한이 없습니다.", ephemeral=True)
+                else:
+                    await interaction.followup.send("취소할 권한이 없습니다.", ephemeral=True)
                 return
 
             game = self.cog.games.get(self.channel_id)
             if game:
                 current_player_id = game['players'][game['current_player']]
                 if interaction.user.id != current_player_id:
-                    await interaction.response.send_message("지금은 당신의 턴이 아닙니다.", ephemeral=True)
+                    if not interaction.response.is_done():
+                        await interaction.response.send_message("지금은 당신의 턴이 아닙니다.", ephemeral=True)
+                    else:
+                        await interaction.followup.send("지금은 당신의 턴이 아닙니다.", ephemeral=True)
                     return
 
             for item in self.children:
                 item.disabled = True
 
             try:
-                await interaction.response.edit_message(content="점수 기록을 취소했습니다.", embed=None, view=self)
+                if not interaction.response.is_done():
+                    await interaction.response.edit_message(content="점수 기록을 취소했습니다.", embed=None, view=self)
+                else:
+                    await interaction.followup.send("점수 기록을 취소했습니다.", ephemeral=True)
             except discord.HTTPException:
                 try:
-                    await interaction.followup.send("점수 기록을 취소했습니다.", ephemeral=True)
+                    if not interaction.response.is_done():
+                        await interaction.response.send_message("점수 기록을 취소했습니다.", ephemeral=True)
+                    else:
+                        await interaction.followup.send("점수 기록을 취소했습니다.", ephemeral=True)
                 except Exception:
                     logger.exception("취소 후속 응답 실패")
 
@@ -172,11 +208,17 @@ class YachtGameView(discord.ui.View):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if not self.game:
-            await interaction.response.send_message("게임 정보를 찾을 수 없습니다.", ephemeral=True)
+            if not interaction.response.is_done():
+                await interaction.response.send_message("게임 정보를 찾을 수 없습니다.", ephemeral=True)
+            else:
+                await interaction.followup.send("게임 정보를 찾을 수 없습니다.", ephemeral=True)
             return False
         current_player_id = self.game['players'][self.game['current_player']]
         if interaction.user.id != current_player_id:
-            await interaction.response.send_message("아직 당신의 턴이 아니에요!", ephemeral=True)
+            if not interaction.response.is_done():
+                await interaction.response.send_message("아직 당신의 턴이 아니에요!", ephemeral=True)
+            else:
+                await interaction.followup.send("아직 당신의 턴이 아니에요!", ephemeral=True)
             return False
         return True
 
@@ -242,12 +284,18 @@ class YachtGameView(discord.ui.View):
 
     async def _record_cb(self, interaction: discord.Interaction):
         if not self.game['has_rolled']:
-            await interaction.response.send_message("먼저 주사위를 굴려야 점수를 기록할 수 있어요!", ephemeral=True)
+            if not interaction.response.is_done():
+                await interaction.response.send_message("먼저 주사위를 굴려야 점수를 기록할 수 있어요!", ephemeral=True)
+            else:
+                await interaction.followup.send("먼저 주사위를 굴려야 점수를 기록할 수 있어요!", ephemeral=True)
             return
 
         available = [cat for cat, s in self.game['scores'].get(interaction.user.id, {}).items() if s is None]
         if not available:
-            await interaction.response.send_message("기록할 수 있는 카테고리가 없습니다.", ephemeral=True)
+            if not interaction.response.is_done():
+                await interaction.response.send_message("기록할 수 있는 카테고리가 없습니다.", ephemeral=True)
+            else:
+                await interaction.followup.send("기록할 수 있는 카테고리가 없습니다.", ephemeral=True)
             return
 
         record_view = RecordView(self.cog, self.channel_id, interaction.user, available)
@@ -267,7 +315,10 @@ class YachtGameView(discord.ui.View):
             embed.add_field(name="예상 점수 (2/2)", value="\n".join(preview_lines[half:]), inline=True)
 
         try:
-            await interaction.response.send_message(embed=embed, view=record_view, ephemeral=True)
+            if not interaction.response.is_done():
+                await interaction.response.send_message(embed=embed, view=record_view, ephemeral=True)
+            else:
+                await interaction.followup.send(embed=embed, view=record_view, ephemeral=True)
         except discord.Forbidden:
             logger.error("record 뷰 전송 권한 없음")
         except discord.HTTPException:
@@ -338,7 +389,10 @@ class YachtDiceGame(commands.Cog):
         self.locks = {}
 
     def calculate_score(self, dice, category):
-        dice_count = [dice.count(i) for i in range(1, 7)]
+        # 각 주사위 값(1~6)의 개수를 계산
+        dice_count = {i: dice.count(i) for i in range(1, 7)}
+        counts_list = [dice_count[i] for i in range(1, 7)]
+        
         if category == 'ones': return dice.count(1) * 1
         elif category == 'twos': return dice.count(2) * 2
         elif category == 'threes': return dice.count(3) * 3
@@ -347,11 +401,12 @@ class YachtDiceGame(commands.Cog):
         elif category == 'sixes': return dice.count(6) * 6
         elif category == 'choice': return sum(dice)
         elif category == 'four_of_a_kind':
-            if any(c >= 4 for c in dice_count):
+            if any(c >= 4 for c in counts_list):
                 return sum(dice)
             return 0
         elif category == 'full_house':
-            counts = sorted([c for c in dice_count if c > 0])
+            # 풀하우스: 정확히 3개와 2개의 같은 숫자 조합
+            counts = sorted([c for c in counts_list if c > 0])
             if len(counts) == 2 and counts == [2, 3]:
                 return 25
             return 0
@@ -368,7 +423,7 @@ class YachtDiceGame(commands.Cog):
                 return 40
             return 0
         elif category == 'yacht':
-            if any(c == 5 for c in dice_count):
+            if any(c == 5 for c in counts_list):
                 return 50
             return 0
         return 0
@@ -532,7 +587,10 @@ class YachtDiceGame(commands.Cog):
     async def show_game_status(self, interaction: discord.Interaction, channel_id: int, ephemeral=False):
         game = self.games.get(channel_id)
         if not game:
-            await interaction.response.send_message("해당 채널에 진행 중인 게임이 없습니다.", ephemeral=True)
+            if not interaction.response.is_done():
+                await interaction.response.send_message("해당 채널에 진행 중인 게임이 없습니다.", ephemeral=True)
+            else:
+                await interaction.followup.send("해당 채널에 진행 중인 게임이 없습니다.", ephemeral=True)
             return
 
         embed = discord.Embed(title="📋 점수판", color=0x95a5a6)
@@ -574,13 +632,19 @@ class YachtDiceGame(commands.Cog):
             embed.add_field(name=user_name, value=field_value, inline=True)
 
         try:
-            await interaction.response.send_message(embed=embed, ephemeral=ephemeral)
-        except discord.HTTPException:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(embed=embed, ephemeral=ephemeral)
+            else:
+                await interaction.followup.send(embed=embed, ephemeral=ephemeral)
+        except discord.HTTPException as e:
             logger.exception("점수판 표시 실패")
             try:
-                await interaction.response.send_message("점수판을 표시하는 중 오류가 발생했습니다.", ephemeral=True)
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("점수판을 표시하는 중 오류가 발생했습니다.", ephemeral=True)
+                else:
+                    await interaction.followup.send("점수판을 표시하는 중 오류가 발생했습니다.", ephemeral=True)
             except Exception:
-                pass
+                logger.exception("점수판 오류 메시지 전송 실패")
 
     async def _advance_turn_unlocked(self, channel_id: int, guild: Optional[discord.Guild] = None):
         game = self.games.get(channel_id)

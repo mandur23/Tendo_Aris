@@ -49,6 +49,7 @@
 - **Python 3.8 이상** (Coqui TTS 사용 시 Python 3.9~3.11 권장, Python 3.12는 Coqui TTS 미지원)
 - **FFmpeg** (음성 처리용)
 - **Discord Bot Token**
+- **MySQL 5.7 이상** (선택사항, 히스토리/플레이리스트를 데이터베이스에 저장하려는 경우)
 
 ### 1. 저장소 클론
 ```bash
@@ -68,6 +69,8 @@ pip install -r requirements.txt
 - `rapidfuzz>=3.0.0` - 명령어 자동 완성 (문자열 매칭)
 - `gtts>=2.5.0` - Google TTS
 - `PyNaCl>=1.6.0` - Discord 음성 지원
+- `aiomysql>=0.2.0` - MySQL 비동기 연결 (선택사항)
+- `PyMySQL>=1.1.0` - MySQL 드라이버 (선택사항)
 
 **선택적 패키지:**
 - `TTS>=0.20.0` - Coqui TTS (Python 3.12 미지원, Python 3.11 이하 권장)
@@ -89,6 +92,43 @@ FFMPEG_PATH=C:\path\to\your\ffmpeg.exe
    - Linux/Mac: `FFMPEG_PATH=/usr/bin/ffmpeg`
 
 또는 `utils/config.py`에서 직접 경로를 수정할 수 있습니다.
+
+#### 3.3 MySQL 데이터베이스 설정 (선택사항)
+
+히스토리와 플레이리스트를 MySQL 데이터베이스에 저장하려면 다음 설정을 추가하세요:
+
+**1. MySQL 데이터베이스 생성:**
+```sql
+CREATE DATABASE tendo_aris CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+```
+
+**2. `TOKEN.env` 파일에 MySQL 설정 추가:**
+```env
+USE_MYSQL=true
+MYSQL_HOST=localhost
+MYSQL_PORT=3306
+MYSQL_USER=root
+MYSQL_PASSWORD=your_password
+MYSQL_DATABASE=tendo_aris
+MYSQL_CHARSET=utf8mb4
+```
+
+**3. 데이터베이스 초기화:**
+```bash
+python init_database.py
+```
+
+이 스크립트는 필요한 테이블을 자동으로 생성합니다.
+
+**4. (선택) 기존 JSON 데이터 마이그레이션:**
+기존에 JSON 파일로 저장된 히스토리와 플레이리스트를 MySQL로 마이그레이션하려면:
+```bash
+python migrate_to_mysql.py
+```
+
+**참고:**
+- `USE_MYSQL=false` 또는 설정하지 않으면 기존처럼 JSON 파일을 사용합니다.
+- MySQL 사용 시 JSON 파일은 백업용으로 남겨두는 것을 권장합니다.
 
 ### 4. 봇 실행
 ```bash
@@ -209,6 +249,7 @@ Tendo_Aris/
 ├── utils/                      # 유틸리티 함수
 │   ├── __init__.py
 │   ├── config.py               # 설정 상수 및 환경 변수
+│   ├── db_utils.py             # MySQL 데이터베이스 유틸리티
 │   ├── discord_utils.py        # Discord 유틸리티
 │   ├── file_utils.py           # 파일 I/O 유틸리티
 │   ├── tts_utils.py            # TTS 유틸리티 (gTTS)
@@ -218,18 +259,34 @@ Tendo_Aris/
 ├── logs/                       # 로그 파일 디렉토리
 │   └── yacht_bot.log           # 봇 로그 파일
 │
-├── playlists.json              # 플레이리스트 데이터 (자동 생성)
-├── history.json                # 재생 기록 데이터 (자동 생성)
-└── tts_settings.json           # TTS 설정 데이터 (자동 생성)
+├── playlists.json              # 플레이리스트 데이터 (JSON 모드, 자동 생성)
+├── history.json                # 재생 기록 데이터 (JSON 모드, 자동 생성)
+├── tts_settings.json           # TTS 설정 데이터 (자동 생성)
+├── init_database.py            # MySQL 데이터베이스 초기화 스크립트
+└── migrate_to_mysql.py         # JSON → MySQL 마이그레이션 스크립트
 ```
 
 ## 🔧 설정 및 커스터마이징
 
 ### 환경 변수 설정 (`TOKEN.env`)
 
+**기본 설정 (JSON 파일 사용):**
 ```env
 DISCORD_BOT_TOKEN=your_bot_token_here
 FFMPEG_PATH=C:\path\to\ffmpeg.exe
+```
+
+**MySQL 데이터베이스 사용 시 추가 설정:**
+```env
+DISCORD_BOT_TOKEN=your_bot_token_here
+FFMPEG_PATH=C:\path\to\ffmpeg.exe
+USE_MYSQL=true
+MYSQL_HOST=localhost
+MYSQL_PORT=3306
+MYSQL_USER=root
+MYSQL_PASSWORD=your_password
+MYSQL_DATABASE=tendo_aris
+MYSQL_CHARSET=utf8mb4
 ```
 
 ### 코드 내 설정 (`utils/config.py`)
@@ -254,6 +311,16 @@ BASE_DELAY = 2                    # 재시도 기본 지연 시간 (초)
 
 # 메시지 삭제 지연
 COMMAND_MESSAGE_DELETE_DELAY = 3  # 명령어 메시지 삭제 지연 (초)
+
+# MySQL 데이터베이스 설정
+MYSQL_HOST = 'localhost'          # MySQL 호스트
+MYSQL_PORT = 3306                 # MySQL 포트
+MYSQL_USER = 'root'               # MySQL 사용자
+MYSQL_PASSWORD = ''               # MySQL 비밀번호
+MYSQL_DATABASE = 'tendo_aris'     # MySQL 데이터베이스 이름
+MYSQL_CHARSET = 'utf8mb4'         # MySQL 문자셋
+
+USE_MYSQL = False                 # MySQL 사용 여부 (True면 MySQL, False면 JSON)
 ```
 
 ### 로깅 설정 (`logging_config.py`)
@@ -289,6 +356,13 @@ COMMAND_MESSAGE_DELETE_DELAY = 3  # 명령어 메시지 삭제 지연 (초)
 - 봇이 명령어 자동 완성 기능을 제공 (오타 시 비슷한 명령어 제안)
 - `!도움말` 명령어로 전체 명령어 목록 확인
 
+#### 6. MySQL 연결 오류
+- MySQL 서버가 실행 중인지 확인
+- `TOKEN.env`의 MySQL 설정 정보 확인
+- 데이터베이스가 생성되어 있는지 확인 (`init_database.py` 실행)
+- 사용자 권한 확인 (데이터베이스 접근 권한 필요)
+- MySQL 연결 실패 시 자동으로 JSON 파일 모드로 전환됩니다
+
 ### 로그 확인
 
 ```bash
@@ -320,6 +394,13 @@ Get-Content logs/yacht_bot.log -Wait
 - 음성 채널에 아무도 없을 때 자동으로 나가기
 - 일정 시간 비활동 시 자동 재시작
 
+### 데이터 저장 옵션
+- **JSON 파일 모드** (기본): 히스토리와 플레이리스트를 JSON 파일로 저장
+- **MySQL 데이터베이스 모드**: 히스토리와 플레이리스트를 MySQL 데이터베이스에 저장
+  - 더 안정적이고 확장 가능한 데이터 저장
+  - 여러 봇 인스턴스에서 동일한 데이터 공유 가능
+  - 자동 테이블 생성 및 마이그레이션 지원
+
 ## 🤝 기여하기
 
 1. Fork the Project
@@ -340,6 +421,8 @@ Get-Content logs/yacht_bot.log -Wait
 - [gTTS](https://github.com/pndurette/gTTS) - Google Text-to-Speech
 - [Coqui TTS](https://github.com/coqui-ai/TTS) - 고품질 TTS 엔진
 - [RapidFuzz](https://github.com/rapidfuzz/rapidfuzz) - 빠르고 효율적인 문자열 매칭
+- [aiomysql](https://github.com/aio-libs/aiomysql) - MySQL 비동기 연결
+- [PyMySQL](https://github.com/PyMySQL/PyMySQL) - MySQL 드라이버
 
 ## 📞 지원
 

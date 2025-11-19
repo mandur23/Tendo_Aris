@@ -11,18 +11,6 @@ from logging_config import setup_logging
 from utils.config import DISCORD_BOT_TOKEN, COMMAND_PREFIX
 from typing import Optional
 
-# 대시보드(FastAPI) 통합
-try:
-    from dashboard.server import start_dashboard, stop_dashboard
-except Exception:
-    start_dashboard = None  # 선택적 의존성(대시보드 비활성 시 None)
-    stop_dashboard = None
-    
-# FastAPI에서 Bot 인스턴스 접근을 위한 런타임 레지스트리
-try:
-    from core.runtime import set_bot
-except Exception:
-    set_bot = None
 
 # 로깅 설정
 setup_logging()
@@ -52,20 +40,7 @@ async def main():
         sys.exit(1)
     
     try:
-        # 대시보드 서버 시작(선택적)
-        if start_dashboard:
-            try:
-                await start_dashboard(host='localhost', port=8080)
-            except Exception as e:
-                logger.warning(f"대시보드 시작 실패: {e}")
-
         async with bot:
-            # 런타임 레지스트리에 봇 인스턴스 등록 (대시보드 API에서 사용)
-            if set_bot:
-                try:
-                    set_bot(bot)
-                except Exception as e:
-                    logger.debug(f"봇 레지스트리 등록 실패: {e}")
             await bot.add_cog(Music(bot))
             await bot.add_cog(TTS(bot))
             await bot.add_cog(YachtDiceGame(bot))
@@ -102,12 +77,6 @@ async def main():
     finally:
         if not bot.is_closed():
             await bot.close()
-        # 대시보드 서버 종료(선택적)
-        if stop_dashboard:
-            try:
-                await stop_dashboard()
-            except Exception as e:
-                logger.debug(f"대시보드 종료 중 오류: {e}")
         logger.info("봇이 정상적으로 종료되었습니다.")
 
 

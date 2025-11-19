@@ -3,6 +3,7 @@ import logging
 import os
 import tempfile
 from pathlib import Path
+from utils.config import USE_MYSQL
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,10 @@ def atomic_write_json(path, data):
 
 
 def load_history():
-    """히스토리를 파일에서 로드합니다."""
+    """히스토리를 로드합니다. (MySQL 사용 시 비동기 함수 사용 필요)"""
+    if USE_MYSQL:
+        logger.warning("MySQL이 활성화되어 있습니다. load_history_from_db()를 사용하세요.")
+        return {}
     try:
         with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
             content = f.read()
@@ -70,7 +74,10 @@ def load_history():
 
 
 def save_history(history):
-    """히스토리를 파일에 원자적으로 저장합니다."""
+    """히스토리를 저장합니다. (MySQL 사용 시 비동기 함수 사용 필요)"""
+    if USE_MYSQL:
+        logger.warning("MySQL이 활성화되어 있습니다. save_history_to_db()를 사용하세요.")
+        return
     try:
         atomic_write_json(HISTORY_FILE, history)
     except Exception as e:
@@ -78,7 +85,10 @@ def save_history(history):
 
 
 def load_playlists():
-    """플레이리스트를 파일에서 로드합니다."""
+    """플레이리스트를 로드합니다. (MySQL 사용 시 비동기 함수 사용 필요)"""
+    if USE_MYSQL:
+        logger.warning("MySQL이 활성화되어 있습니다. load_playlists_from_db()를 사용하세요.")
+        return {}
     try:
         with open(PLAYLISTS_FILE, 'r', encoding='utf-8') as f:
             content = f.read()
@@ -101,7 +111,10 @@ def load_playlists():
 
 
 def save_playlists(playlists):
-    """플레이리스트를 파일에 원자적으로 저장합니다."""
+    """플레이리스트를 저장합니다. (MySQL 사용 시 비동기 함수 사용 필요)"""
+    if USE_MYSQL:
+        logger.warning("MySQL이 활성화되어 있습니다. save_playlists_to_db()를 사용하세요.")
+        return
     try:
         atomic_write_json(PLAYLISTS_FILE, playlists)
     except Exception as e:

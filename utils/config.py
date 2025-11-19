@@ -29,3 +29,14 @@ BASE_DELAY = 2
 # 메시지 삭제 지연
 COMMAND_MESSAGE_DELETE_DELAY = 3  # 초
 
+# MySQL 데이터베이스 설정
+MYSQL_HOST = os.getenv('MYSQL_HOST', 'localhost')
+MYSQL_PORT = int(os.getenv('MYSQL_PORT', '3306'))
+MYSQL_USER = os.getenv('MYSQL_USER', 'root')
+MYSQL_PASSWORD = os.getenv('MYSQL_PASSWORD', '')
+MYSQL_DATABASE = os.getenv('MYSQL_DATABASE', 'tendo_aris')
+MYSQL_CHARSET = os.getenv('MYSQL_CHARSET', 'utf8mb4')
+
+# DB 사용 여부 (True면 MySQL 사용, False면 JSON 파일 사용)
+USE_MYSQL = os.getenv('USE_MYSQL', 'false').lower() == 'true'
+

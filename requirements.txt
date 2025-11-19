@@ -5,23 +5,11 @@ async-timeout>=4.0.0
 rapidfuzz>=3.0.0  # fuzzywuzzy 대체 - 더 빠르고 경량
 gtts>=2.5.0
 PyNaCl>=1.6.0  # Discord 음성 지원을 위한 필수 패키지
+aiomysql>=0.2.0  # MySQL 비동기 연결
+PyMySQL>=1.1.0  # MySQL 드라이버
 # TTS>=0.20.0  # Coqui TTS (optional, not supported on Python 3.12)
 # TTS package is not available for Python 3.12
 # Coqui TTS는 Python >=3.9.0,<3.12 버전만 지원합니다
 # Python 3.12에서는 설치할 수 없습니다
 # Use Python 3.11 or lower if TTS is needed, or use gTTS only
 # Python 3.11 사용 방법: py -3.11 -m venv venv
-
-# --- Dashboard (FastAPI) & System metrics ---
-fastapi>=0.112.0
-uvicorn>=0.30.0
-psutil>=5.9.0
-requests>=2.31.0
-
-# --- Optional GPU collectors (설치 가능 시에만) ---
-# NVIDIA용 pynvml (Windows/Linux)
-# pynvml>=11.5.0
-# Windows WMI (AMD/Intel 등 Windows GPU 기본 정보)
-# wmi>=1.5.1; sys_platform == 'win32'
-# Linux AMD: ROCm은 외부 도구(rocm-smi)가 필요합니다. pip로 설치하는 항목은 없습니다.
-# Intel Linux: intel-gpu-tools 패키지(intel_gpu_top)는 OS 패키지 관리자(apt/yum)로 설치하세요.
