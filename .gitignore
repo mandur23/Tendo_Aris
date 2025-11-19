@@ -38,6 +38,12 @@ wheels/
 *.log
 logs/
 
+# JSON 데이터 파일 (사용자 데이터)
+history.json
+playlists.json
+tts_settings.json
+*.json.bak
+
 # 임시 파일
 *.tmp
 *.tmp_*
