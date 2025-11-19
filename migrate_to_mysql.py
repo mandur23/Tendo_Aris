@@ -15,10 +15,40 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from utils.config import USE_MYSQL
 from utils.db_utils import init_db_pool, close_db_pool, add_history_item_to_db, save_playlist_to_db
-from utils.file_utils import load_history, load_playlists
+from utils.file_utils import HISTORY_FILE, PLAYLISTS_FILE
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def load_history_from_json():
+    """JSON 파일에서 히스토리를 직접 로드합니다. (마이그레이션용)"""
+    try:
+        with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+            content = f.read()
+            if not content:
+                return {}
+            return json.loads(content)
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError as e:
+        logger.warning(f"히스토리 파일이 손상되었습니다: {e}")
+        return {}
+
+
+def load_playlists_from_json():
+    """JSON 파일에서 플레이리스트를 직접 로드합니다. (마이그레이션용)"""
+    try:
+        with open(PLAYLISTS_FILE, 'r', encoding='utf-8') as f:
+            content = f.read()
+            if not content:
+                return {}
+            return json.loads(content)
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError as e:
+        logger.warning(f"플레이리스트 파일이 손상되었습니다: {e}")
+        return {}
 
 
 async def migrate_history():
@@ -29,8 +59,8 @@ async def migrate_history():
     
     logger.info("히스토리 마이그레이션을 시작합니다...")
     
-    # JSON 파일에서 히스토리 로드
-    history = load_history()
+    # JSON 파일에서 히스토리 직접 로드 (마이그레이션용)
+    history = load_history_from_json()
     
     if not history:
         logger.info("마이그레이션할 히스토리가 없습니다.")
@@ -81,8 +111,8 @@ async def migrate_playlists():
     
     logger.info("플레이리스트 마이그레이션을 시작합니다...")
     
-    # JSON 파일에서 플레이리스트 로드
-    playlists = load_playlists()
+    # JSON 파일에서 플레이리스트 직접 로드 (마이그레이션용)
+    playlists = load_playlists_from_json()
     
     if not playlists:
         logger.info("마이그레이션할 플레이리스트가 없습니다.")

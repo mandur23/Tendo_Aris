@@ -360,16 +360,17 @@ async def save_playlist_to_db(guild_id: int, playlist_id: str, urls: List[str]):
                 )
                 
                 # 새 플레이리스트 삽입
-                for position, url in enumerate(urls):
-                    await cur.execute("""
-                        INSERT INTO playlists (guild_id, playlist_id, url, position)
-                        VALUES (%s, %s, %s, %s)
-                    """, (
-                        guild_id,
-                        playlist_id,
-                        url[:500],
-                        position
-                    ))
+                if urls:  # 빈 리스트가 아닌 경우만
+                    for position, url in enumerate(urls):
+                        await cur.execute("""
+                            INSERT INTO playlists (guild_id, playlist_id, url, position)
+                            VALUES (%s, %s, %s, %s)
+                        """, (
+                            guild_id,
+                            playlist_id,
+                            url[:500],
+                            position
+                        ))
                 
                 await conn.commit()
     except Exception as e:
