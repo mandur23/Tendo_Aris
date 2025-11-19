@@ -20,7 +20,15 @@ class DateRotatingFileHandler(logging.FileHandler):
         self.current_file = file_path
         
         # 부모 클래스 초기화 (첫 파일로)
+        # line buffering으로 설정하여 실시간 저장
         logging.FileHandler.__init__(self, str(file_path), mode='a', encoding=encoding)
+        # line buffering 활성화 (각 줄마다 즉시 저장)
+        if hasattr(self.stream, 'reconfigure'):
+            # Python 3.7+ 버전
+            try:
+                self.stream.reconfigure(line_buffering=True)
+            except (ValueError, AttributeError):
+                pass
     
     def _get_date_folder_and_file(self):
         """현재 날짜에 맞는 폴더 경로와 파일 경로를 반환"""
@@ -47,6 +55,7 @@ class DateRotatingFileHandler(logging.FileHandler):
         if self.current_date != date_str:
             # 기존 스트림 닫기
             if self.stream and not self.stream.closed:
+                self.stream.flush()  # 변경 전 기존 로그 저장
                 self.stream.close()
             
             self.current_date = date_str
@@ -56,6 +65,12 @@ class DateRotatingFileHandler(logging.FileHandler):
             self.baseFilename = str(file_path)
             if self.stream is None or self.stream.closed:
                 self.stream = self._open()
+                # line buffering 활성화 (각 줄마다 즉시 저장)
+                if hasattr(self.stream, 'reconfigure'):
+                    try:
+                        self.stream.reconfigure(line_buffering=True)
+                    except (ValueError, AttributeError):
+                        pass
     
     def shouldRollover(self, record):
         """날짜가 바뀌었는지 확인"""
@@ -67,13 +82,16 @@ class DateRotatingFileHandler(logging.FileHandler):
         self._update_file_path()
     
     def emit(self, record):
-        """로그 레코드를 파일에 기록"""
+        """로그 레코드를 파일에 기록 (실시간 저장)"""
         try:
             # 날짜 확인 및 롤오버 처리
             if self.shouldRollover(record):
                 self.doRollover()
             
             logging.FileHandler.emit(self, record)
+            # 실시간으로 파일에 저장하기 위해 즉시 flush
+            if self.stream:
+                self.stream.flush()
         except Exception:
             self.handleError(record)
 
