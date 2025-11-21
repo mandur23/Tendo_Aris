@@ -793,6 +793,44 @@ class YachtDiceGame(commands.Cog):
                 pass
             logger.exception(f"Yacht game error: {error}")
 
+    # ========== Slash Commands ==========
+    
+    async def slash_yacht(self, interaction: discord.Interaction):
+        """Slash Command로 야추 다이스 게임 시작"""
+        ctx = await self.bot.get_context(interaction)
+        await self.yacht_game(ctx)
+    
+    async def slash_start(self, interaction: discord.Interaction):
+        """Slash Command로 대기 중인 야추 게임 시작"""
+        ctx = await self.bot.get_context(interaction)
+        await self.start_yacht_game(ctx)
+    
+    async def slash_yacht_cancel(self, interaction: discord.Interaction):
+        """Slash Command로 진행 중인 야추 게임 취소"""
+        ctx = await self.bot.get_context(interaction)
+        await self.cancel_yacht_game(ctx)
+    
+    async def cog_load(self):
+        """Cog가 로드될 때 Slash Commands 등록"""
+        # 야추 게임 그룹 생성
+        self.yacht_group = discord.app_commands.Group(name="야추", description="야추 다이스 게임 관련 명령어")
+        
+        # 그룹에 명령어 추가
+        self.yacht_group.command(name="참가", description="야추 다이스 게임을 시작하거나 참가합니다")(self.slash_yacht)
+        self.yacht_group.command(name="시작", description="대기 중인 야추 게임을 시작합니다")(self.slash_start)
+        self.yacht_group.command(name="취소", description="진행 중인 야추 게임을 취소합니다")(self.slash_yacht_cancel)
+        
+        # 봇에 그룹 등록
+        self.bot.tree.add_command(self.yacht_group, override=True)
+    
+    async def cog_unload(self):
+        """Cog가 언로드될 때 Slash Commands 제거"""
+        try:
+            if hasattr(self, 'yacht_group'):
+                self.bot.tree.remove_command(self.yacht_group.name)
+        except Exception as e:
+            logger.error(f"Slash Commands 제거 중 오류: {e}")
+
 
 async def setup(bot):
     await bot.add_cog(YachtDiceGame(bot))

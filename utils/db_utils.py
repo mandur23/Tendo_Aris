@@ -1,6 +1,7 @@
 """MySQL 데이터베이스 연결 및 CRUD 유틸리티"""
 import logging
 import asyncio
+import warnings
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 import aiomysql
@@ -10,6 +11,9 @@ from utils.config import (
 )
 
 logger = logging.getLogger(__name__)
+
+# MySQL 경고 메시지 억제 (테이블이 이미 존재하는 경우의 경고)
+warnings.filterwarnings('ignore', category=aiomysql.Warning)
 
 # 전역 연결 풀
 _pool: Optional[aiomysql.Pool] = None
@@ -43,10 +47,26 @@ async def close_db_pool():
     """데이터베이스 연결 풀을 종료합니다."""
     global _pool
     if _pool:
-        _pool.close()
-        await _pool.wait_closed()
-        _pool = None
-        logger.info("MySQL 연결 풀이 종료되었습니다.")
+        try:
+            # 이벤트 루프가 열려있는지 확인
+            try:
+                loop = asyncio.get_running_loop()
+                if loop.is_closed():
+                    logger.warning("이벤트 루프가 이미 닫혀있습니다. DB 연결 풀을 동기적으로 정리합니다.")
+                    _pool = None
+                    return
+            except RuntimeError:
+                logger.warning("실행 중인 이벤트 루프가 없습니다. DB 연결 풀을 정리하지 않습니다.")
+                _pool = None
+                return
+            
+            _pool.close()
+            await _pool.wait_closed()
+            logger.info("MySQL 연결 풀이 종료되었습니다.")
+        except Exception as e:
+            logger.warning(f"DB 연결 풀 종료 중 오류 발생 (무시됨): {e}")
+        finally:
+            _pool = None
 
 
 async def get_pool() -> aiomysql.Pool:
@@ -60,7 +80,14 @@ async def create_tables():
     """필요한 테이블을 생성합니다."""
     pool = await get_pool()
     async with pool.acquire() as conn:
+        # 경고 메시지 억제를 위해 커서 생성 시 suppress_warnings 사용
         async with conn.cursor() as cur:
+            # MySQL 경고 억제
+            try:
+                await cur.execute("SET sql_notes = 0")  # MySQL 경고 메시지 억제
+            except Exception:
+                pass  # 실패해도 계속 진행
+            
             # 히스토리 테이블
             await cur.execute("""
                 CREATE TABLE IF NOT EXISTS music_history (
@@ -87,6 +114,12 @@ async def create_tables():
                     INDEX idx_guild_playlist (guild_id, playlist_id)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """)
+            
+            # 경고 설정 복원
+            try:
+                await cur.execute("SET sql_notes = 1")
+            except Exception:
+                pass
             
             await conn.commit()
             logger.info("데이터베이스 테이블이 생성/확인되었습니다.")

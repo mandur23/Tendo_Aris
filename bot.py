@@ -75,8 +75,22 @@ async def main():
     except Exception as e:
         logger.error(f"봇 실행 중 오류 발생: {e}", exc_info=True)
     finally:
+        # DB 연결 풀 정리 (봇 종료 전)
+        try:
+            # bot.get_cog()를 사용하여 이미 로드된 Music Cog 가져오기
+            music_cog = bot.get_cog('Music')
+            if music_cog:
+                await music_cog.cog_unload()
+        except Exception as e:
+            logger.debug(f"봇 종료 시 Cog 언로드 중 오류 (무시됨): {e}")
+        
+        # 봇 종료
         if not bot.is_closed():
-            await bot.close()
+            try:
+                await bot.close()
+            except Exception as e:
+                logger.debug(f"봇 종료 중 오류 (무시됨): {e}")
+        
         logger.info("봇이 정상적으로 종료되었습니다.")
 
 

@@ -130,8 +130,19 @@ class TTS(commands.Cog):
             if ctx.voice_client.is_playing():
                 ctx.voice_client.stop()
             
-            # FFmpeg 경로 설정
-            source = discord.FFmpegPCMAudio(str(tts_file), executable=FFMPEG_PATH)
+            # FFmpeg 경로 설정 (None이거나 빈 문자열이면 기본값 사용)
+            ffmpeg_executable = FFMPEG_PATH if FFMPEG_PATH and Path(FFMPEG_PATH).exists() else None
+            if not ffmpeg_executable:
+                # 시스템 PATH에서 ffmpeg 찾기
+                import shutil
+                ffmpeg_executable = shutil.which('ffmpeg')
+            
+            if not ffmpeg_executable:
+                logger.error("FFmpeg를 찾을 수 없습니다. FFMPEG_PATH를 설정하거나 시스템 PATH에 ffmpeg를 추가해주세요.")
+                cleanup_tts_file(tts_file)
+                return False
+            
+            source = discord.FFmpegPCMAudio(str(tts_file), executable=ffmpeg_executable)
             
             def after_play(error):
                 """재생 완료 후 콜백"""
@@ -389,23 +400,32 @@ class TTS(commands.Cog):
         from utils.tts_utils import COQUI_AVAILABLE as _coqui_avail
         
         # TTS 엔진 선택 (gTTS 또는 Coqui)
-        engine_select = discord.ui.Select(
-            placeholder=f"TTS 엔진 선택 (현재: {'Coqui TTS' if use_coqui else 'gTTS'})",
-            options=[
-                discord.SelectOption(
-                    label="gTTS (Google TTS)",
-                    value="gtts",
-                    description="빠르고 간단한 TTS",
-                    default=(not use_coqui)
-                ),
+        engine_options = [
+            discord.SelectOption(
+                label="gTTS (Google TTS)",
+                value="gtts",
+                description="빠르고 간단한 TTS",
+                default=(not use_coqui)
+            )
+        ]
+        
+        # Coqui TTS 옵션 추가 (사용 가능한 경우만)
+        if _coqui_avail:
+            engine_options.append(
                 discord.SelectOption(
                     label="Coqui TTS",
                     value="coqui",
                     description="고품질 TTS, 커스텀 모델 지원",
-                    default=use_coqui,
-                    disabled=(not _coqui_avail)
+                    default=use_coqui
                 )
-            ]
+            )
+        else:
+            # Coqui TTS를 사용할 수 없으면 선택지를 추가하지 않음
+            pass
+        
+        engine_select = discord.ui.Select(
+            placeholder=f"TTS 엔진 선택 (현재: {'Coqui TTS' if use_coqui and _coqui_avail else 'gTTS'})",
+            options=engine_options
         )
         
         async def engine_select_callback(interaction):
@@ -672,3 +692,48 @@ class TTS(commands.Cog):
         
         await ctx.send(embed=embed, delete_after=30)
         await self.delete_command_message(ctx)
+
+    # ========== Slash Commands ==========
+    
+    @discord.app_commands.describe(text="읽을 텍스트 (입력하지 않으면 자동 읽기 모드 토글)")
+    async def slash_tts(self, interaction: discord.Interaction, text: str = None):
+        """Slash Command로 TTS 자동 읽기 모드 토글 또는 텍스트 읽기"""
+        ctx = await self.bot.get_context(interaction)
+        await self.tts_command(ctx, text=text)
+    
+    async def slash_tts_voice(self, interaction: discord.Interaction):
+        """Slash Command로 TTS 목소리 모델 변경"""
+        ctx = await self.bot.get_context(interaction)
+        await self.tts_voice_command(ctx)
+    
+    async def slash_tts_slow(self, interaction: discord.Interaction):
+        """Slash Command로 TTS 느린 속도 모드 토글"""
+        ctx = await self.bot.get_context(interaction)
+        await self.tts_slow_toggle(ctx)
+    
+    async def slash_tts_settings(self, interaction: discord.Interaction):
+        """Slash Command로 현재 TTS 설정 확인"""
+        ctx = await self.bot.get_context(interaction)
+        await self.tts_settings_command(ctx)
+    
+    async def cog_load(self):
+        """Cog가 로드될 때 Slash Commands 등록"""
+        # TTS 그룹 생성
+        self.tts_group = discord.app_commands.Group(name="tts", description="TTS (Text-to-Speech) 관련 명령어")
+        
+        # 그룹에 명령어 추가
+        self.tts_group.command(name="말하기", description="TTS 자동 읽기 모드를 토글하거나 텍스트를 읽어줍니다")(self.slash_tts)
+        self.tts_group.command(name="목소리", description="TTS 목소리 모델을 변경합니다")(self.slash_tts_voice)
+        self.tts_group.command(name="느리게", description="TTS 느린 속도 모드를 토글합니다")(self.slash_tts_slow)
+        self.tts_group.command(name="설정", description="현재 TTS 설정을 확인합니다")(self.slash_tts_settings)
+        
+        # 봇에 그룹 등록
+        self.bot.tree.add_command(self.tts_group, override=True)
+    
+    async def cog_unload(self):
+        """Cog가 언로드될 때 Slash Commands 제거"""
+        try:
+            if hasattr(self, 'tts_group'):
+                self.bot.tree.remove_command(self.tts_group.name)
+        except Exception as e:
+            logger.error(f"Slash Commands 제거 중 오류: {e}")

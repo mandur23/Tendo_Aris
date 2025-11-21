@@ -65,6 +65,11 @@ class MusicPlayer:
         @self.bot.listen('on_voice_state_update')
         async def on_voice_state_update(member, before, after):
             self.last_activity.set()
+            
+            # voice_client가 없으면 무시
+            if not self.guild.voice_client:
+                return
+                
             if before.channel is not None and after.channel is None:
                 if member == self.guild.me:
                     return
@@ -72,17 +77,30 @@ class MusicPlayer:
                 if len(before.channel.members) > 1:
                     return
 
-                await self.guild.voice_client.pause()
+                try:
+                    if self.guild.voice_client and self.guild.voice_client.is_connected():
+                        await self.guild.voice_client.pause()
+                except Exception as e:
+                    logger.debug(f"일시정지 중 오류 (무시됨): {e}")
+                    
                 await asyncio.sleep(10)
                 await self.stop()
-                message = await member.send("아리스가 음성 채널에서 나가요. 다음에 또 불러주세요!")
-                await asyncio.sleep(3)
-                await message.delete()
+                
+                try:
+                    message = await member.send("아리스가 음성 채널에서 나가요. 다음에 또 불러주세요!")
+                    await asyncio.sleep(3)
+                    await message.delete()
+                except Exception as e:
+                    logger.debug(f"메시지 전송/삭제 중 오류 (무시됨): {e}")
 
             if after.channel is not None and member != self.guild.me:
                 if len(after.channel.members) == 1:
-                    await self.guild.voice_client.disconnect()
-                    await member.send("아리스가 음성 채널에서 나가요. 다음에 또 불러주세요!")
+                    try:
+                        if self.guild.voice_client and self.guild.voice_client.is_connected():
+                            await self.guild.voice_client.disconnect()
+                            await member.send("아리스가 음성 채널에서 나가요. 다음에 또 불러주세요!")
+                    except Exception as e:
+                        logger.debug(f"연결 해제 중 오류 (무시됨): {e}")
 
     async def player_loop(self):
         await self.bot.wait_until_ready()
@@ -138,10 +156,20 @@ class MusicPlayer:
             await self.update_button_styles(view)
 
             try:
+                # voice_client 확인
+                if not self.guild.voice_client:
+                    await safe_send(self.channel, "음성 채널에 연결되어 있지 않아요. 재생을 중단합니다.", delete_after=10)
+                    self.next.set()
+                    continue
+                    
                 if self.guild.voice_client.is_playing():
                     self.guild.voice_client.stop()
 
                 for play_attempt in range(MAX_PLAY_RETRIES):
+                    # 재생 시도 전에 voice_client 확인
+                    if not self.guild.voice_client:
+                        break
+                        
                     try:
                         self.guild.voice_client.play(
                             discord.FFmpegPCMAudio(source['url'], executable=ffmpeg_path,
@@ -223,74 +251,140 @@ class MusicPlayer:
         stop_button = Button(label="종료", style=discord.ButtonStyle.danger)
 
         async def play_pause_callback(interaction):
-            if self.guild.voice_client.is_paused():
-                self.guild.voice_client.resume()
-                await interaction.response.send_message("선생님, 노래를 다시 재생할게요!", ephemeral=True, delete_after=3)
-            else:
-                self.guild.voice_client.pause()
-                await interaction.response.send_message("노래를 잠시 멈췄어요. 계속 들으시려면 다시 눌러주세요, 선생님!", ephemeral=True,
-                                                        delete_after=3)
+            try:
+                if not self.guild.voice_client:
+                    await interaction.response.send_message("음성 채널에 연결되어 있지 않아요!", ephemeral=True, delete_after=3)
+                    return
+                    
+                if self.guild.voice_client.is_paused():
+                    self.guild.voice_client.resume()
+                    await interaction.response.send_message("선생님, 노래를 다시 재생할게요!", ephemeral=True, delete_after=3)
+                else:
+                    self.guild.voice_client.pause()
+                    await interaction.response.send_message("노래를 잠시 멈췄어요. 계속 들으시려면 다시 눌러주세요, 선생님!", ephemeral=True,
+                                                            delete_after=3)
+            except discord.errors.NotFound:
+                logger.debug("인터랙션 응답 시간 초과 (무시됨)")
+            except Exception as e:
+                logger.debug(f"play_pause_callback 중 오류 (무시됨): {e}")
 
         async def skip_callback(interaction):
-            self.guild.voice_client.stop()
-            await interaction.response.send_message("알겠어요, 선생님! 다음 노래로 넘어갈게요!", ephemeral=True, delete_after=3)
+            try:
+                if not self.guild.voice_client:
+                    await interaction.response.send_message("음성 채널에 연결되어 있지 않아요!", ephemeral=True, delete_after=3)
+                    return
+                    
+                self.guild.voice_client.stop()
+                await interaction.response.send_message("알겠어요, 선생님! 다음 노래로 넘어갈게요!", ephemeral=True, delete_after=3)
+            except discord.errors.NotFound:
+                logger.debug("인터랙션 응답 시간 초과 (무시됨)")
+            except Exception as e:
+                logger.debug(f"skip_callback 중 오류 (무시됨): {e}")
 
         async def loop_callback(interaction):
-            if self.random_play:
-                await interaction.response.send_message("랜덤 재생이 활성화되어 있어요. 한 곡 반복을 켜기 전에 랜덤 재생을 꺼야 해요.", ephemeral=True)
-                return
+            try:
+                if self.random_play:
+                    await interaction.response.send_message("랜덤 재생이 활성화되어 있어요. 한 곡 반복을 켜기 전에 랜덤 재생을 꺼야 해요.", ephemeral=True)
+                    return
 
-            self.loop = not self.loop
-            loop.style = discord.ButtonStyle.success if self.loop else discord.ButtonStyle.danger
-            await interaction.response.edit_message(view=view)
+                self.loop = not self.loop
+                loop.style = discord.ButtonStyle.success if self.loop else discord.ButtonStyle.danger
+                await interaction.response.edit_message(view=view)
+            except discord.errors.NotFound:
+                logger.debug("인터랙션 응답 시간 초과 (무시됨)")
+            except Exception as e:
+                logger.debug(f"loop_callback 중 오류 (무시됨): {e}")
 
         async def queue_loop_callback(interaction):
-            self.queue_loop = not self.queue_loop
-            queue_loop.style = discord.ButtonStyle.success if self.queue_loop else discord.ButtonStyle.danger
-            await interaction.response.edit_message(view=view)
+            try:
+                self.queue_loop = not self.queue_loop
+                queue_loop.style = discord.ButtonStyle.success if self.queue_loop else discord.ButtonStyle.danger
+                await interaction.response.edit_message(view=view)
+            except discord.errors.NotFound:
+                logger.debug("인터랙션 응답 시간 초과 (무시됨)")
+            except Exception as e:
+                logger.debug(f"queue_loop_callback 중 오류 (무시됨): {e}")
 
         async def random_play_callback(interaction):
-            if self.loop:
-                await interaction.response.send_message("한 곡 반복이 활성화되어 있어요. 랜덤 재생을 켜기 전에 한 곡 반복을 꺼야 해요.",
-                                                        ephemeral=True)
-                return
+            try:
+                if self.loop:
+                    await interaction.response.send_message("한 곡 반복이 활성화되어 있어요. 랜덤 재생을 켜기 전에 한 곡 반복을 꺼야 해요.",
+                                                            ephemeral=True)
+                    return
 
-            self.random_play = not self.random_play
-            status = "켜졌어요" if self.random_play else "꺼졌어요"
-            await interaction.response.send_message(f"랜덤 재생 모드가 {status}!", ephemeral=True)
+                self.random_play = not self.random_play
+                status = "켜졌어요" if self.random_play else "꺼졌어요"
+                await interaction.response.send_message(f"랜덤 재생 모드가 {status}!", ephemeral=True)
 
-            random_play.style = discord.ButtonStyle.success if self.random_play else discord.ButtonStyle.secondary
-            await interaction.message.edit(view=view)
+                random_play.style = discord.ButtonStyle.success if self.random_play else discord.ButtonStyle.secondary
+                await interaction.message.edit(view=view)
 
-            if self.random_play:
-                await self.play_next()
+                if self.random_play:
+                    await self.play_next()
+            except discord.errors.NotFound:
+                logger.debug("인터랙션 응답 시간 초과 (무시됨)")
+            except Exception as e:
+                logger.debug(f"random_play_callback 중 오류 (무시됨): {e}")
 
         async def volume_up_callback(interaction):
-            if self.volume < 1.0:
-                self.volume = min(1.0, self.volume + 0.1)
-                self.guild.voice_client.source.volume = self.volume
-                await interaction.response.send_message(f"선생님, 볼륨을 {int(self.volume * 100)}%로 올렸어요! 이제 잘 들리나요?",
-                                                        ephemeral=True, delete_after=3)
-            else:
-                await interaction.response.send_message("앗, 볼륨이 이미 최대예요! 아리스의 귀가 아파요~", ephemeral=True, delete_after=3)
+            try:
+                if not self.guild.voice_client or not self.guild.voice_client.source:
+                    await interaction.response.send_message("음성 채널에 연결되어 있지 않아요!", ephemeral=True, delete_after=3)
+                    return
+                    
+                if self.volume < 1.0:
+                    self.volume = min(1.0, self.volume + 0.1)
+                    self.guild.voice_client.source.volume = self.volume
+                    await interaction.response.send_message(f"선생님, 볼륨을 {int(self.volume * 100)}%로 올렸어요! 이제 잘 들리나요?",
+                                                            ephemeral=True, delete_after=3)
+                else:
+                    await interaction.response.send_message("앗, 볼륨이 이미 최대예요! 아리스의 귀가 아파요~", ephemeral=True, delete_after=3)
+            except discord.errors.NotFound:
+                logger.debug("인터랙션 응답 시간 초과 (무시됨)")
+            except Exception as e:
+                logger.debug(f"volume_up_callback 중 오류 (무시됨): {e}")
 
         async def volume_down_callback(interaction):
-            if self.volume > 0.0:
-                self.volume = max(0.0, self.volume - 0.1)
-                self.guild.voice_client.source.volume = self.volume
-                await interaction.response.send_message(f"선생님, 볼륨을 {int(self.volume * 100)}%로 낮췄어요! 이정도면 괜찮으신가요?",
-                                                        ephemeral=True, delete_after=3)
-            else:
-                await interaction.response.send_message("어머, 볼륨이 이미 최소예요! 더 이상 낮추면 아무 소리도 안 들릴 거예요~", ephemeral=True,
-                                                        delete_after=3)
+            try:
+                if not self.guild.voice_client or not self.guild.voice_client.source:
+                    await interaction.response.send_message("음성 채널에 연결되어 있지 않아요!", ephemeral=True, delete_after=3)
+                    return
+                    
+                if self.volume > 0.0:
+                    self.volume = max(0.0, self.volume - 0.1)
+                    self.guild.voice_client.source.volume = self.volume
+                    await interaction.response.send_message(f"선생님, 볼륨을 {int(self.volume * 100)}%로 낮췄어요! 이정도면 괜찮으신가요?",
+                                                            ephemeral=True, delete_after=3)
+                else:
+                    await interaction.response.send_message("어머, 볼륨이 이미 최소예요! 더 이상 낮추면 아무 소리도 안 들릴 거예요~", ephemeral=True,
+                                                            delete_after=3)
+            except discord.errors.NotFound:
+                logger.debug("인터랙션 응답 시간 초과 (무시됨)")
+            except Exception as e:
+                logger.debug(f"volume_down_callback 중 오류 (무시됨): {e}")
 
         async def stop_callback(interaction):
-            if self.guild.voice_client.is_playing():
-                await self.stop()
-                await interaction.response.send_message("알겠습니다, 선생님! 아리스가 음악 재생을 종료하고 음성 채널에서 나갔어요~ 다음에 또 불러주세요!",
-                                                        ephemeral=True, delete_after=3)
-            else:
-                await interaction.response.send_message("현재 재생 중인 음악이 없어요!", ephemeral=True, delete_after=3)
+            try:
+                # voice_client 확인
+                if self.guild.voice_client and self.guild.voice_client.is_playing():
+                    await self.stop()
+                    try:
+                        await interaction.response.send_message("알겠습니다, 선생님! 아리스가 음악 재생을 종료하고 음성 채널에서 나갔어요~ 다음에 또 불러주세요!",
+                                                                ephemeral=True, delete_after=3)
+                    except discord.errors.NotFound:
+                        # 인터랙션이 이미 만료된 경우
+                        logger.debug("인터랙션 응답 시간 초과 (무시됨)")
+                    except Exception as e:
+                        logger.debug(f"인터랙션 응답 중 오류 (무시됨): {e}")
+                else:
+                    try:
+                        await interaction.response.send_message("현재 재생 중인 음악이 없어요!", ephemeral=True, delete_after=3)
+                    except discord.errors.NotFound:
+                        logger.debug("인터랙션 응답 시간 초과 (무시됨)")
+                    except Exception as e:
+                        logger.debug(f"인터랙션 응답 중 오류 (무시됨): {e}")
+            except Exception as e:
+                logger.error(f"stop_callback 중 오류: {e}")
 
         play_pause.callback = play_pause_callback
         skip.callback = skip_callback
