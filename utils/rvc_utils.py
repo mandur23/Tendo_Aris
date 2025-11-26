@@ -3,9 +3,28 @@ import logging
 from pathlib import Path
 import tempfile
 import asyncio
+import os
 from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
+
+# FFmpeg 경로 설정 (tts-with-rvc가 찾을 수 있도록)
+def _setup_ffmpeg_path():
+    """FFmpeg 경로를 환경 변수에 설정합니다."""
+    try:
+        from utils.config import FFMPEG_PATH
+        if FFMPEG_PATH and Path(FFMPEG_PATH).exists():
+            # FFmpeg 디렉토리를 PATH에 추가
+            ffmpeg_dir = str(Path(FFMPEG_PATH).parent)
+            current_path = os.environ.get('PATH', '')
+            if ffmpeg_dir not in current_path:
+                os.environ['PATH'] = f"{ffmpeg_dir};{current_path}"
+                logger.debug(f"FFmpeg 디렉토리를 PATH에 추가: {ffmpeg_dir}")
+    except Exception as e:
+        logger.warning(f"FFmpeg 경로 설정 중 오류: {e}")
+
+# 모듈 로드 시 FFmpeg 경로 설정
+_setup_ffmpeg_path()
 
 # RVC 사용 가능 여부 확인 (lazy import)
 RVC_AVAILABLE = None
@@ -18,32 +37,34 @@ def _check_rvc_available():
     if RVC_AVAILABLE is not None:
         return RVC_AVAILABLE
     
-    # tts-with-rvc-onnx 우선 시도 (inference_onnx에서 TTS_RVC import)
+    # tts-with-rvc (PyTorch 버전) 우선 시도 - .pth 파일 직접 지원
     try:
-        from tts_with_rvc.inference_onnx import TTS_RVC
+        from tts_with_rvc.inference import TTS_RVC
         _TTS_WITH_RVC = TTS_RVC
         RVC_AVAILABLE = True
-        logger.info("RVC 로드 성공: tts-with-rvc-onnx (inference_onnx)")
+        logger.info("RVC 로드 성공: tts-with-rvc (inference - PyTorch)")
         return True
     except (ImportError, OSError, Exception) as e1:
-        # tts-with-rvc 시도 (inference에서 TTS_RVC import)
+        # 최후의 수단: __init__에서 import 시도
         try:
-            from tts_with_rvc.inference import TTS_RVC
+            from tts_with_rvc import TTS_RVC
             _TTS_WITH_RVC = TTS_RVC
             RVC_AVAILABLE = True
-            logger.info("RVC 로드 성공: tts-with-rvc (inference)")
+            logger.info("RVC 로드 성공: tts-with-rvc (__init__ - PyTorch)")
             return True
         except (ImportError, OSError, Exception) as e2:
-            # 최후의 수단: __init__에서 import 시도
+            # tts-with-rvc-onnx 시도 (ONNX 버전 - .onnx 파일 필요)
             try:
-                from tts_with_rvc import TTS_RVC
+                from tts_with_rvc.inference_onnx import TTS_RVC
                 _TTS_WITH_RVC = TTS_RVC
                 RVC_AVAILABLE = True
-                logger.info("RVC 로드 성공: tts-with-rvc (__init__)")
+                logger.info("RVC 로드 성공: tts-with-rvc-onnx (inference_onnx - ONNX)")
+                logger.warning("ONNX 버전을 사용 중입니다. .pth 파일 대신 .onnx 파일이 필요합니다.")
                 return True
             except (ImportError, OSError, Exception) as e3:
                 RVC_AVAILABLE = False
-                logger.warning(f"RVC를 로드할 수 없습니다. inference_onnx: {e1}, inference: {e2}, __init__: {e3}")
+                logger.warning(f"RVC를 로드할 수 없습니다. inference: {e1}, __init__: {e2}, inference_onnx: {e3}")
+                logger.warning("pip install tts-with-rvc (PyTorch 버전) 또는 pip install tts-with-rvc-onnx (ONNX 버전)를 설치하세요.")
                 return False
 
 # TTS 임시 파일 저장 경로
@@ -75,7 +96,57 @@ def load_rvc_models():
             if not content:
                 return {}
             import json
-            return json.loads(content)
+            models = json.loads(content)
+            
+            # 경로 수정: 하드코딩된 경로를 현재 사용자 경로로 변경
+            from utils.config import BASE_DIR
+            updated = False
+            
+            for model_name, model_info in models.items():
+                # model_path 수정
+                if 'model_path' in model_info:
+                    old_path = model_info['model_path']
+                    # C:\Users\User\... 경로를 현재 BASE_DIR로 변경
+                    if r'C:\Users\User' in old_path:
+                        # Tendo_Aris 이후의 상대 경로 추출
+                        if 'Tendo_Aris' in old_path:
+                            # Tendo_Aris 이후의 경로 추출
+                            parts = old_path.split('Tendo_Aris', 1)
+                            if len(parts) > 1:
+                                relative_path = parts[1].lstrip('\\/')
+                                new_path = str(BASE_DIR / relative_path)
+                                # 파일이 존재하는지 확인
+                                if Path(new_path).exists():
+                                    model_info['model_path'] = new_path
+                                    updated = True
+                                    logger.info(f"경로 수정: {model_name} -> {new_path}")
+                                else:
+                                    logger.warning(f"경로 수정 실패 (파일 없음): {model_name} -> {new_path}")
+                
+                # index_path 수정
+                if 'index_path' in model_info and model_info.get('index_path'):
+                    old_path = model_info['index_path']
+                    if r'C:\Users\User' in old_path:
+                        if 'Tendo_Aris' in old_path:
+                            parts = old_path.split('Tendo_Aris', 1)
+                            if len(parts) > 1:
+                                relative_path = parts[1].lstrip('\\/')
+                                new_path = str(BASE_DIR / relative_path)
+                                if Path(new_path).exists():
+                                    model_info['index_path'] = new_path
+                                    updated = True
+                                else:
+                                    # 파일이 없으면 None으로 설정
+                                    model_info['index_path'] = None
+                                    updated = True
+                                    logger.warning(f"인덱스 파일 없음: {model_name} -> {new_path}")
+            
+            # 경로가 수정되었으면 파일에 저장
+            if updated:
+                save_rvc_models(models)
+                logger.info("RVC 모델 경로가 자동으로 수정되었습니다.")
+            
+            return models
     except (FileNotFoundError, Exception) as e:
         logger.warning(f"RVC 모델 파일 로드 실패: {e}")
         return {}
@@ -183,6 +254,52 @@ def _get_edge_tts_voice(lang: str = 'ko') -> str:
     return EDGE_TTS_VOICES.get(lang, EDGE_TTS_VOICES['ko'])
 
 
+def _get_rvc_device(device_setting: str) -> str:
+    """
+    RVC 디바이스 설정을 반환합니다.
+    
+    Args:
+        device_setting: 'auto', 'cuda', 'cuda:0', 'cpu' 등
+    
+    Returns:
+        실제 사용할 디바이스 ('cuda:0', 'cpu' 등)
+    """
+    if device_setting == 'auto':
+        # CUDA 사용 가능 여부 확인
+        try:
+            import torch
+            if torch.cuda.is_available():
+                device = 'cuda:0'  # tts-with-rvc는 'cuda:0' 형식 요구
+                logger.info(f"CUDA 사용 가능: {torch.cuda.get_device_name(0)} (GPU 사용)")
+                return device
+            else:
+                logger.info("CUDA 사용 불가능, CPU 사용")
+                return 'cpu'
+        except ImportError:
+            logger.warning("PyTorch를 찾을 수 없습니다. CPU 사용")
+            return 'cpu'
+    elif device_setting.startswith('cuda'):
+        # CUDA 강제 사용
+        try:
+            import torch
+            if torch.cuda.is_available():
+                # 'cuda'만 입력된 경우 'cuda:0'으로 변환
+                if device_setting == 'cuda':
+                    device_setting = 'cuda:0'
+                logger.info(f"CUDA 강제 사용: {torch.cuda.get_device_name(0)}")
+                return device_setting
+            else:
+                logger.warning("CUDA를 사용할 수 없지만 강제 설정됨. CPU로 폴백합니다.")
+                return 'cpu'
+        except ImportError:
+            logger.warning("PyTorch를 찾을 수 없습니다. CPU 사용")
+            return 'cpu'
+    else:
+        # CPU 또는 기타 설정
+        logger.info(f"디바이스 설정: {device_setting}")
+        return device_setting
+
+
 def text_to_speech_with_rvc(
     text: str,
     rvc_model_name: str,
@@ -228,31 +345,50 @@ def text_to_speech_with_rvc(
         edge_voice = _get_edge_tts_voice(lang)
         logger.debug(f"Edge TTS voice 선택: {edge_voice} (언어: {lang})")
         
-        # RVC 인스턴스 캐시 키 생성 (모델 경로 + 인덱스 경로 + voice)
-        cache_key = f"{rvc_model['model_path']}_{rvc_model.get('index_path', '')}_{edge_voice}"
+        # GPU/CPU 디바이스 설정
+        from utils.config import RVC_DEVICE
+        device = _get_rvc_device(RVC_DEVICE)
+        
+        # RVC 인스턴스 캐시 키 생성 (모델 경로 + 인덱스 경로 + voice + device)
+        cache_key = f"{rvc_model['model_path']}_{rvc_model.get('index_path', '')}_{edge_voice}_{device}"
         
         # 캐시된 인스턴스가 있으면 재사용, 없으면 새로 생성
+        tts_rvc = None
         if cache_key in _rvc_instances:
             tts_rvc = _rvc_instances[cache_key]
-            logger.debug(f"RVC 인스턴스 재사용: {rvc_model_name}")
+            logger.debug(f"RVC 인스턴스 재사용 시도: {rvc_model_name}")
             # voice가 변경되었을 수 있으므로 업데이트
             if hasattr(tts_rvc, 'set_voice'):
-                tts_rvc.set_voice(edge_voice)
-        else:
+                try:
+                    tts_rvc.set_voice(edge_voice)
+                except Exception as e:
+                    logger.warning(f"인스턴스 voice 설정 실패, 재생성: {e}")
+                    # 인스턴스가 손상되었을 수 있으므로 제거하고 재생성
+                    del _rvc_instances[cache_key]
+                    tts_rvc = None
+        
+        if tts_rvc is None:
             # TTS + RVC 인스턴스 생성
             # output_directory는 디렉토리 경로여야 하며, 파일 경로가 아닙니다.
             output_dir = str(output_path.parent)
-            logger.info(f"RVC 인스턴스 생성 중: {rvc_model_name} (처음 사용 시 느릴 수 있습니다)")
-            tts_rvc = _TTS_WITH_RVC(
-                model_path=str(rvc_model['model_path']),
-                index_path=str(rvc_model.get('index_path', '')) if rvc_model.get('index_path') else '',
-                voice=edge_voice,  # Edge TTS voice 추가
-                tmp_directory=str(TTS_TEMP_DIR),
-                output_directory=output_dir  # 디렉토리 경로
-            )
-            # 인스턴스 캐시에 저장
-            _rvc_instances[cache_key] = tts_rvc
-            logger.info(f"RVC 인스턴스 생성 완료 및 캐시 저장: {rvc_model_name}")
+            
+            logger.info(f"RVC 인스턴스 생성 중: {rvc_model_name} (디바이스: {device}, 처음 사용 시 느릴 수 있습니다)")
+            
+            try:
+                tts_rvc = _TTS_WITH_RVC(
+                    model_path=str(rvc_model['model_path']),
+                    index_path=str(rvc_model.get('index_path', '')) if rvc_model.get('index_path') else '',
+                    voice=edge_voice,  # Edge TTS voice 추가
+                    tmp_directory=str(TTS_TEMP_DIR),
+                    output_directory=output_dir,  # 디렉토리 경로
+                    device=device  # GPU/CPU 디바이스 설정
+                )
+                # 인스턴스 캐시에 저장
+                _rvc_instances[cache_key] = tts_rvc
+                logger.info(f"RVC 인스턴스 생성 완료 및 캐시 저장: {rvc_model_name}")
+            except Exception as e:
+                logger.error(f"RVC 인스턴스 생성 실패: {e}")
+                raise
         
         # 텍스트를 음성으로 변환 (__call__ 메서드 사용)
         # speed는 tts_rate 파라미터로 변환 (0 = 기본 속도, 양수/음수로 속도 조정)
@@ -265,16 +401,58 @@ def text_to_speech_with_rvc(
             raise ValueError("텍스트가 비어있습니다.")
         
         # output_filename은 파일 이름만 (확장자 포함)
-        try:
-            output_file = tts_rvc(
-                text=text,
-                pitch=pitch,
-                tts_rate=tts_rate,
-                output_filename=output_path.name  # 파일 이름만 (예: "output.wav")
-            )
-        except Exception as e:
-            logger.error(f"TTS_RVC 호출 중 오류: {e}, voice={edge_voice}, text_length={len(text)}")
-            raise
+        max_retries = 2
+        retry_count = 0
+        output_file = None
+        
+        while retry_count < max_retries:
+            try:
+                output_file = tts_rvc(
+                    text=text,
+                    pitch=pitch,
+                    tts_rate=tts_rate,
+                    output_filename=output_path.name  # 파일 이름만 (예: "output.wav")
+                )
+                break  # 성공하면 루프 종료
+            except Exception as e:
+                retry_count += 1
+                logger.warning(f"TTS_RVC 호출 중 오류 (시도 {retry_count}/{max_retries}): {e}, voice={edge_voice}, text_length={len(text)}")
+                
+                if retry_count >= max_retries:
+                    # 최대 재시도 횟수 초과 시 인스턴스를 캐시에서 제거하고 오류 발생
+                    if cache_key in _rvc_instances:
+                        logger.warning(f"손상된 RVC 인스턴스 제거: {cache_key}")
+                        try:
+                            del _rvc_instances[cache_key]
+                        except:
+                            pass
+                    logger.error(f"TTS_RVC 호출 최종 실패: {e}")
+                    raise
+                else:
+                    # 인스턴스 재생성 시도
+                    logger.info(f"RVC 인스턴스 재생성 시도...")
+                    if cache_key in _rvc_instances:
+                        try:
+                            del _rvc_instances[cache_key]
+                        except:
+                            pass
+                    
+                    # 인스턴스 재생성
+                    output_dir = str(output_path.parent)
+                    try:
+                        tts_rvc = _TTS_WITH_RVC(
+                            model_path=str(rvc_model['model_path']),
+                            index_path=str(rvc_model.get('index_path', '')) if rvc_model.get('index_path') else '',
+                            voice=edge_voice,
+                            tmp_directory=str(TTS_TEMP_DIR),
+                            output_directory=output_dir,
+                            device=device
+                        )
+                        _rvc_instances[cache_key] = tts_rvc
+                        logger.info(f"RVC 인스턴스 재생성 완료")
+                    except Exception as recreate_error:
+                        logger.error(f"RVC 인스턴스 재생성 실패: {recreate_error}")
+                        raise
         
         # 반환된 경로가 다를 수 있으므로 확인
         if isinstance(output_file, str):

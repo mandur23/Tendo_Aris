@@ -184,7 +184,33 @@ class TTS(commands.Cog):
                 cleanup_tts_file(tts_file)
                 return False
             
-            source = discord.FFmpegPCMAudio(str(tts_file), executable=ffmpeg_executable)
+            # 파일 존재 확인
+            if not tts_file.exists():
+                logger.error(f"TTS 파일이 존재하지 않습니다: {tts_file}")
+                cleanup_tts_file(tts_file)
+                return False
+            
+            # 파일 크기 확인
+            file_size = tts_file.stat().st_size
+            if file_size == 0:
+                logger.error(f"TTS 파일이 비어있습니다: {tts_file} (크기: {file_size} bytes)")
+                cleanup_tts_file(tts_file)
+                return False
+            
+            logger.debug(f"TTS 파일 재생 준비: {tts_file} (크기: {file_size} bytes)")
+            
+            # FFmpeg 옵션 (로컬 파일이므로 간단한 옵션만 사용)
+            # before_options는 로컬 파일에는 필요 없음
+            options = '-vn'  # 비디오 없음, 오디오만
+            
+            source = discord.FFmpegPCMAudio(
+                str(tts_file), 
+                executable=ffmpeg_executable,
+                options=options
+            )
+            
+            # 볼륨 조정을 위해 PCMVolumeTransformer 사용
+            source = discord.PCMVolumeTransformer(source, volume=1.0)
             
             def after_play(error):
                 """재생 완료 후 콜백"""
@@ -200,12 +226,14 @@ class TTS(commands.Cog):
                         self.bot.loop
                     )
                 else:
+                    logger.debug(f"TTS 재생 완료: {tts_file}")
                     # 재생 성공 시 정상 처리
                     asyncio.run_coroutine_threadsafe(
                         self._cleanup_after_play(tts_file, ctx, music_player, volume_lowered, music_was_playing, music_was_paused),
                         self.bot.loop
                     )
             
+            logger.info(f"TTS 재생 시작: {tts_file.name}")
             ctx.voice_client.play(source, after=after_play)
             
             return True
@@ -433,16 +461,11 @@ class TTS(commands.Cog):
             )
             
             if new_state:
-                try:
-                    await ctx.author.send("선생님, 이제부터 선생님의 채팅을 자동으로 읽어드릴게요! `!tts목소리` 명령어로 목소리를 바꿀 수 있어요~", delete_after=10)
-                except (discord.Forbidden, discord.HTTPException):
-                    # DM을 보낼 수 없는 경우 일반 채널에 ephemeral 스타일로 표시 (하지만 일반 메시지이므로 짧게)
-                    await ctx.send("선생님, 이제부터 선생님의 채팅을 자동으로 읽어드릴게요! `!tts목소리` 명령어로 목소리를 바꿀 수 있어요~", delete_after=5)
+                # 명령어 실행자에게만 보이도록 매우 짧게 표시
+                await ctx.send(f"{ctx.author.mention}, 이제부터 선생님의 채팅을 자동으로 읽어드릴게요! `!tts목소리` 명령어로 목소리를 바꿀 수 있어요~", delete_after=2)
             else:
-                try:
-                    await ctx.author.send("선생님, TTS 자동 읽기 모드를 껐어요. 다시 켜려면 `!tts`를 입력해주세요!", delete_after=10)
-                except (discord.Forbidden, discord.HTTPException):
-                    await ctx.send("선생님, TTS 자동 읽기 모드를 껐어요. 다시 켜려면 `!tts`를 입력해주세요!", delete_after=5)
+                # 명령어 실행자에게만 보이도록 매우 짧게 표시
+                await ctx.send(f"{ctx.author.mention}, TTS 자동 읽기 모드를 껐어요. 다시 켜려면 `!tts`를 입력해주세요!", delete_after=2)
             
             await self.delete_command_message(ctx)
             return

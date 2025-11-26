@@ -15,6 +15,6 @@ cryptography>=41.0.0  # MySQL sha256_password/caching_sha2_password 인증을 �
 # 의존성 충돌을 무시하고 설치하세요 (대부분 작동합니다).
 
 # RVC 지원 (TTS + RVC 결합)
-# tts-with-rvc-onnx: ONNX 런타임 사용 (권장, 더 빠름)
-tts-with-rvc-onnx>=0.1.0  # TTS와 RVC를 결합한 라이브러리 (텍스트를 바로 원하는 목소리로 변환)
-# 또는 tts-with-rvc>=0.1.0  # PyTorch 사용 버전
+# tts-with-rvc: PyTorch 사용 버전 (.pth 파일 직접 지원, 권장)
+tts-with-rvc>=0.1.0  # TTS와 RVC를 결합한 라이브러리 (텍스트를 바로 원하는 목소리로 변환)
+# 또는 tts-with-rvc-onnx>=0.1.0  # ONNX 런타임 사용 (.onnx 파일 필요)

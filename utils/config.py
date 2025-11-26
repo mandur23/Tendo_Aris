@@ -9,15 +9,16 @@ load_dotenv(dotenv_path=Path(__file__).parent.parent / 'TOKEN.env')
 # 경로 설정
 BASE_DIR = Path(__file__).parent.parent
 # FFmpeg 경로 설정 (환경 변수 또는 기본값)
-_default_ffmpeg_path = r'C:\Users\User\ffmpeg-2024-10-21-git-baa23e40c1-full_build\bin\ffmpeg.exe'
-FFMPEG_PATH = os.getenv('FFMPEG_PATH', _default_ffmpeg_path)
+# 하드코딩된 경로 대신 시스템 PATH에서 찾거나 환경 변수 사용
+FFMPEG_PATH = os.getenv('FFMPEG_PATH', None)
 
-# FFmpeg 경로 검증
-if not Path(FFMPEG_PATH).exists():
-    import logging
-    logger = logging.getLogger(__name__)
-    logger.warning(f"FFmpeg 경로를 찾을 수 없습니다: {FFMPEG_PATH}")
-    logger.warning("환경 변수 FFMPEG_PATH를 설정하거나, TOKEN.env 파일에 FFMPEG_PATH를 추가해주세요.")
+# FFmpeg 경로 검증 및 설정
+import logging
+logger = logging.getLogger(__name__)
+
+if FFMPEG_PATH and Path(FFMPEG_PATH).exists():
+    logger.info(f"FFmpeg 경로 설정됨: {FFMPEG_PATH}")
+else:
     # 시스템 PATH에서 ffmpeg 찾기 시도
     import shutil
     system_ffmpeg = shutil.which('ffmpeg')
@@ -25,7 +26,18 @@ if not Path(FFMPEG_PATH).exists():
         FFMPEG_PATH = system_ffmpeg
         logger.info(f"시스템 PATH에서 ffmpeg를 찾았습니다: {FFMPEG_PATH}")
     else:
-        logger.error("FFmpeg를 찾을 수 없습니다. 음악 재생 기능이 정상적으로 작동하지 않을 수 있습니다.")
+        logger.warning("FFmpeg를 찾을 수 없습니다. 환경 변수 FFMPEG_PATH를 설정하거나, TOKEN.env 파일에 FFMPEG_PATH를 추가해주세요.")
+        logger.warning("또는 시스템 PATH에 ffmpeg를 추가해주세요.")
+        FFMPEG_PATH = None
+
+# tts-with-rvc 라이브러리가 FFmpeg를 찾을 수 있도록 환경 변수 설정
+if FFMPEG_PATH:
+    # FFmpeg 디렉토리를 PATH에 추가 (tts-with-rvc가 찾을 수 있도록)
+    ffmpeg_dir = str(Path(FFMPEG_PATH).parent)
+    current_path = os.environ.get('PATH', '')
+    if ffmpeg_dir not in current_path:
+        os.environ['PATH'] = f"{ffmpeg_dir};{current_path}"
+        logger.debug(f"FFmpeg 디렉토리를 PATH에 추가: {ffmpeg_dir}")
 
 # 봇 설정
 DISCORD_BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN', '').strip()
@@ -56,4 +68,10 @@ MYSQL_CHARSET = os.getenv('MYSQL_CHARSET', 'utf8mb4')
 
 # DB 사용 여부 (True면 MySQL 사용, False면 JSON 파일 사용)
 USE_MYSQL = os.getenv('USE_MYSQL', 'false').lower() == 'true'
+
+# RVC GPU 설정
+# 'auto': CUDA 사용 가능하면 GPU 사용, 아니면 CPU 사용
+# 'cuda' 또는 'cuda:0': GPU 강제 사용 (CUDA 사용 불가능하면 오류 발생)
+# 'cpu': CPU 강제 사용
+RVC_DEVICE = os.getenv('RVC_DEVICE', 'auto').lower()
 
