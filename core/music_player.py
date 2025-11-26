@@ -36,6 +36,11 @@ class MusicPlayer:
         self.inactive_time = 0
 
         self.random_play = False
+        self.voice_channel = (
+            ctx.voice_client.channel if ctx.voice_client and ctx.voice_client.channel
+            else ctx.author.voice.channel if ctx.author.voice
+            else None
+        )
 
         self.bot.loop.create_task(self.player_loop())
         self.bot.loop.create_task(self.register_voice_state_listener())
@@ -61,6 +66,73 @@ class MusicPlayer:
         """현재 프로그램을 재시작합니다."""
         os.execv(sys.executable, ['python'] + sys.argv)
 
+    def update_voice_channel(self, channel):
+        if channel:
+            self.voice_channel = channel
+
+    def update_voice_channel_from_context(self, ctx):
+        channel = None
+        if ctx.voice_client and ctx.voice_client.channel:
+            channel = ctx.voice_client.channel
+        elif ctx.author.voice:
+            channel = ctx.author.voice.channel
+        self.update_voice_channel(channel)
+
+    def refresh_voice_channel_from_client(self):
+        if self.guild.voice_client and self.guild.voice_client.channel:
+            self.voice_channel = self.guild.voice_client.channel
+
+    async def attempt_reconnect(self, max_attempts: int = 3) -> bool:
+        if not self.voice_channel:
+            return False
+
+        logger.warning(f"{self.guild.name} 음성 채널 연결 끊김 감지 - 재연결 시도 시작")
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                voice_client = self.guild.voice_client
+                if voice_client:
+                    if voice_client.is_connected() and voice_client.channel == self.voice_channel:
+                        logger.info("음성 채널 이미 연결되어 있음 - 재연결 불필요")
+                        return True
+                    try:
+                        await voice_client.disconnect(force=True)
+                    except Exception as disconnect_error:
+                        logger.debug(f"재연결 전 기존 연결 해제 실패 (무시됨): {disconnect_error}")
+
+                await self.voice_channel.connect(reconnect=True)
+                self.refresh_voice_channel_from_client()
+                await safe_send(
+                    self.channel,
+                    "선생님, 음성 채널 연결이 끊어져서 다시 붙었어요! 계속 재생해볼게요.",
+                    delete_after=10
+                )
+                logger.info(f"{self.guild.name} 음성 채널 재연결 성공 (시도 {attempt}/{max_attempts})")
+                return True
+            except discord.ClientException as ce:
+                if 'already connected' in str(ce).lower():
+                    self.refresh_voice_channel_from_client()
+                    return True
+                logger.warning(f"음성 채널 재연결 시도 {attempt}/{max_attempts} 실패 (ClientException): {ce}")
+            except Exception as e:
+                logger.warning(f"음성 채널 재연결 시도 {attempt}/{max_attempts} 실패: {e}")
+
+            await asyncio.sleep(3 * attempt)
+
+        await safe_send(
+            self.channel,
+            "선생님, 음성 채널에 다시 연결하려 했지만 계속 실패했어요. 잠시 후 다시 시도해 주세요.",
+            delete_after=10
+        )
+        return False
+
+    async def ensure_voice_connection(self) -> bool:
+        self.refresh_voice_channel_from_client()
+        voice_client = self.guild.voice_client
+        if voice_client and voice_client.is_connected():
+            return True
+        return await self.attempt_reconnect()
+
     async def register_voice_state_listener(self):
         @self.bot.listen('on_voice_state_update')
         async def on_voice_state_update(member, before, after):
@@ -69,6 +141,21 @@ class MusicPlayer:
             # voice_client가 없으면 무시
             if not self.guild.voice_client:
                 return
+
+            if member == self.guild.me:
+                if after.channel and after.channel != self.voice_channel:
+                    self.voice_channel = after.channel
+                if before.channel and after.channel is None:
+                    if not self.current and self.queue.empty():
+                        return
+                    if await self.attempt_reconnect():
+                        return
+                    await safe_send(
+                        self.channel,
+                        "선생님, 음성 채널에서 쫓겨나서 재연결을 시도했지만 실패했어요. 다시 불러주실래요?",
+                        delete_after=10
+                    )
+                    return
                 
             if before.channel is not None and after.channel is None:
                 if member == self.guild.me:
@@ -157,8 +244,7 @@ class MusicPlayer:
 
             try:
                 # voice_client 확인
-                if not self.guild.voice_client:
-                    await safe_send(self.channel, "음성 채널에 연결되어 있지 않아요. 재생을 중단합니다.", delete_after=10)
+                if not await self.ensure_voice_connection():
                     self.next.set()
                     continue
                     
@@ -230,6 +316,7 @@ class MusicPlayer:
         self.queue._queue.clear()
         if self.guild.voice_client:
             await self.guild.voice_client.disconnect()
+        self.voice_channel = None
         self.current = None
         self.loop = False
         self.queue_loop = False

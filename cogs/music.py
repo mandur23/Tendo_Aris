@@ -157,11 +157,13 @@ class Music(commands.Cog):
 
     def get_player(self, ctx):
         if ctx.guild.id in self.players:
-            return self.players[ctx.guild.id]
+            player = self.players[ctx.guild.id]
         else:
             player = MusicPlayer(ctx)
             self.players[ctx.guild.id] = player
-            return player
+        
+        player.update_voice_channel_from_context(ctx)
+        return player
 
 
     # ========== 음악 재생 관련 명령어 ==========
