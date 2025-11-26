@@ -25,11 +25,19 @@ class MusicPlayer:
 
         self.np = None
         self.volume = DEFAULT_VOLUME
+        self.original_volume = DEFAULT_VOLUME  # TTS 재생 전 원래 볼륨 저장
         self.current = None
         self.loop = False
         self.queue_loop = False
         self.current_message = None
         self.button_message = None
+        
+        # TTS 재생을 위한 재생 위치 추적
+        self.playback_start_time = None  # 재생 시작 시간
+        self.paused_at_position = 0  # 일시정지된 위치 (초)
+        self.last_position_update = None  # 마지막 위치 업데이트 시간
+        self.position_tracker_task = None  # 위치 추적 태스크
+        self.paused_at_time = None  # 일시정지된 시점 (시간)
 
         self.idle_timeout = IDLE_TIMEOUT
         self.last_activity = asyncio.Event()
@@ -42,25 +50,68 @@ class MusicPlayer:
             else None
         )
 
-        self.bot.loop.create_task(self.player_loop())
-        self.bot.loop.create_task(self.register_voice_state_listener())
-        self.bot.loop.create_task(self.check_idle_timeout())
+        # 백그라운드 태스크 추적 및 종료 플래그
+        self._shutdown = False
+        self._tasks = []
+        self._voice_state_listener = None
+
+        # 태스크들을 생성하고 추적
+        self._tasks.append(self.bot.loop.create_task(self.player_loop()))
+        self._tasks.append(self.bot.loop.create_task(self.register_voice_state_listener()))
+        self._tasks.append(self.bot.loop.create_task(self.check_idle_timeout()))
+        self._tasks.append(self.bot.loop.create_task(self.track_playback_position()))
 
     @property
     def is_playing(self):
         return self.guild.voice_client and self.guild.voice_client.is_playing()
 
     async def check_idle_timeout(self):
-        while True:
-            await asyncio.sleep(1)
-            if not self.last_activity.is_set():
-                self.inactive_time += 1
-                if self.inactive_time >= self.idle_timeout:
-                    logger.info(f"비활동 시간 {self.idle_timeout}초 초과. 봇을 재시작합니다.")
-                    await self.stop()
-                    self.restart_program()
-            else:
-                self.inactive_time = 0
+        while not self._shutdown and not self.bot.is_closed():
+            try:
+                await asyncio.sleep(1)
+                if self._shutdown:
+                    break
+                if not self.last_activity.is_set():
+                    self.inactive_time += 1
+                    if self.inactive_time >= self.idle_timeout:
+                        logger.info(f"비활동 시간 {self.idle_timeout}초 초과. 봇을 재시작합니다.")
+                        await self.stop()
+                        self.restart_program()
+                else:
+                    self.inactive_time = 0
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                if not self._shutdown:
+                    logger.debug(f"idle_timeout 체크 중 오류 (무시됨): {e}")
+                break
+
+    async def track_playback_position(self):
+        """재생 위치를 주기적으로 추적하여 업데이트합니다."""
+        import time
+        while not self._shutdown and not self.bot.is_closed():
+            try:
+                await asyncio.sleep(0.5)  # 0.5초마다 위치 업데이트
+                
+                if self._shutdown:
+                    break
+                
+                # 재생 중이고 재생 시작 시간이 있고, 일시정지되지 않았을 때만 위치 업데이트
+                if (self.guild.voice_client and 
+                    self.guild.voice_client.is_playing() and 
+                    not self.guild.voice_client.is_paused() and
+                    self.playback_start_time and
+                    self.paused_at_time is None):  # 일시정지되지 않았을 때만
+                    current_time = time.time()
+                    elapsed = current_time - self.playback_start_time
+                    self.paused_at_position = max(0, elapsed)
+                    self.last_position_update = current_time
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                if not self._shutdown:
+                    logger.debug(f"재생 위치 추적 중 오류 (무시됨): {e}")
+                await asyncio.sleep(1)
 
     def restart_program(self):
         """현재 프로그램을 재시작합니다."""
@@ -85,6 +136,21 @@ class MusicPlayer:
     async def attempt_reconnect(self, max_attempts: int = 3) -> bool:
         if not self.voice_channel:
             return False
+
+        # 재생할 곡이 없으면 재연결 시도하지 않음
+        if not self.current and self.queue.empty():
+            logger.info(f"{self.guild.name} 재생할 곡이 없어 재연결을 시도하지 않습니다.")
+            return False
+
+        # TTS 재생 중이거나 대기열이 있으면 재연결 시도하지 않음
+        tts_cog = self.bot.get_cog('TTS')
+        if tts_cog:
+            tts_queue = getattr(tts_cog, 'tts_queue', {})
+            tts_playing = getattr(tts_cog, 'playing', {})
+            if (self.guild.id in tts_queue and tts_queue[self.guild.id]) or \
+               tts_playing.get(self.guild.id, False):
+                logger.info(f"{self.guild.name} TTS 재생 중이어서 재연결을 시도하지 않습니다.")
+                return False
 
         logger.warning(f"{self.guild.name} 음성 채널 연결 끊김 감지 - 재연결 시도 시작")
 
@@ -134,8 +200,10 @@ class MusicPlayer:
         return await self.attempt_reconnect()
 
     async def register_voice_state_listener(self):
-        @self.bot.listen('on_voice_state_update')
         async def on_voice_state_update(member, before, after):
+            if self._shutdown:
+                return
+            
             self.last_activity.set()
             
             # voice_client가 없으면 무시
@@ -146,8 +214,20 @@ class MusicPlayer:
                 if after.channel and after.channel != self.voice_channel:
                     self.voice_channel = after.channel
                 if before.channel and after.channel is None:
+                    # 재생할 곡이 없으면 재연결 시도하지 않음
                     if not self.current and self.queue.empty():
                         return
+                    
+                    # TTS 재생 중이거나 대기열이 있으면 재연결 시도하지 않음
+                    tts_cog = self.bot.get_cog('TTS')
+                    if tts_cog:
+                        tts_queue = getattr(tts_cog, 'tts_queue', {})
+                        tts_playing = getattr(tts_cog, 'playing', {})
+                        if (self.guild.id in tts_queue and tts_queue[self.guild.id]) or \
+                           tts_playing.get(self.guild.id, False):
+                            logger.info(f"{self.guild.name} TTS 재생 중이어서 재연결을 시도하지 않습니다.")
+                            return
+                    
                     if await self.attempt_reconnect():
                         return
                     await safe_send(
@@ -171,7 +251,8 @@ class MusicPlayer:
                     logger.debug(f"일시정지 중 오류 (무시됨): {e}")
                     
                 await asyncio.sleep(10)
-                await self.stop()
+                if not self._shutdown:
+                    await self.stop()
                 
                 try:
                     message = await member.send("아리스가 음성 채널에서 나가요. 다음에 또 불러주세요!")
@@ -188,15 +269,37 @@ class MusicPlayer:
                             await member.send("아리스가 음성 채널에서 나가요. 다음에 또 불러주세요!")
                     except Exception as e:
                         logger.debug(f"연결 해제 중 오류 (무시됨): {e}")
+        
+        # 이벤트 리스너 등록
+        self._voice_state_listener = on_voice_state_update
+        self.bot.add_listener(on_voice_state_update, 'on_voice_state_update')
+        
+        # 종료될 때까지 대기
+        try:
+            while not self._shutdown and not self.bot.is_closed():
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            # 이벤트 리스너 제거
+            if self._voice_state_listener:
+                try:
+                    self.bot.remove_listener(self._voice_state_listener, 'on_voice_state_update')
+                except Exception as e:
+                    logger.debug(f"이벤트 리스너 제거 중 오류 (무시됨): {e}")
+                self._voice_state_listener = None
 
     async def player_loop(self):
         await self.bot.wait_until_ready()
 
-        while not self.bot.is_closed():
+        while not self._shutdown and not self.bot.is_closed():
             self.next.clear()
             self.last_activity.set()
 
             await self.delete_messages()
+            
+            if self._shutdown:
+                break
 
             if self.loop and self.current:
                 source = self.current
@@ -208,8 +311,10 @@ class MusicPlayer:
                     async with timeout(QUEUE_TIMEOUT):
                         source = await self.queue.get()
                 except asyncio.TimeoutError:
-                    await self.delete_messages()
-                    return await self.stop()
+                    if not self._shutdown:
+                        await self.delete_messages()
+                        await self.stop()
+                    break
 
             if not isinstance(source, dict):
                 try:
@@ -257,6 +362,10 @@ class MusicPlayer:
                         break
                         
                     try:
+                        # 재생 시작 시간 기록 (재생이 실제로 시작된 후 기록)
+                        import time
+                        play_start_time = time.time()
+                        
                         self.guild.voice_client.play(
                             discord.FFmpegPCMAudio(source['url'], executable=ffmpeg_path,
                                                    before_options=ffmpeg_options['before_options'],
@@ -265,6 +374,15 @@ class MusicPlayer:
                         )
                         self.guild.voice_client.source = discord.PCMVolumeTransformer(self.guild.voice_client.source)
                         self.guild.voice_client.source.volume = self.volume
+                        
+                        # 재생이 시작된 후 정확한 시간 기록
+                        # 약간의 지연 후 재생 시작 시간 기록 (실제 재생 시작 시점에 가깝게)
+                        await asyncio.sleep(0.1)
+                        if self.guild.voice_client.is_playing():
+                            self.playback_start_time = play_start_time
+                            self.paused_at_position = 0
+                            self.last_position_update = time.time()
+                            logger.debug(f"재생 시작 시간 기록: {self.playback_start_time}")
                         break
                     except Exception as play_error:
                         if play_attempt == MAX_PLAY_RETRIES - 1:
@@ -291,7 +409,14 @@ class MusicPlayer:
                 logger.error(f"상세 오류 정보: {e.__class__.__name__}: {str(e)}")
                 self.next.set()
 
-            await self.next.wait()
+            # 재생 완료 대기 (종료 플래그 확인)
+            try:
+                await asyncio.wait_for(self.next.wait(), timeout=None)
+            except asyncio.CancelledError:
+                break
+            
+            if self._shutdown:
+                break
 
             if self.queue_loop and not self.loop:
                 await self.queue.put(self.current)
@@ -299,7 +424,8 @@ class MusicPlayer:
             if self.queue.empty() and not (self.loop or self.queue_loop):
                 await self.delete_messages()
                 await self.stop()
-                await safe_send(self.channel, "선생님, 재생할 곡이 더 이상 없어요. 아리스가 음성 채널에서 나갈게요~", delete_after=10)
+                if not self._shutdown:
+                    await safe_send(self.channel, "선생님, 재생할 곡이 더 이상 없어요. 아리스가 음성 채널에서 나갈게요~", delete_after=10)
                 break
 
     async def delete_messages(self):
@@ -313,14 +439,55 @@ class MusicPlayer:
             self.button_message = None
 
     async def stop(self):
+        """재생을 중지하고 모든 리소스를 정리합니다."""
+        if self._shutdown:
+            return
+        
+        self._shutdown = True
+        
+        # 대기 중인 루프 깨우기
+        self.next.set()
+        
+        # 큐 비우기
         self.queue._queue.clear()
-        if self.guild.voice_client:
-            await self.guild.voice_client.disconnect()
+        
+        # 음성 클라이언트 연결 해제
+        try:
+            if self.guild.voice_client:
+                if self.guild.voice_client.is_playing():
+                    self.guild.voice_client.stop()
+                await self.guild.voice_client.disconnect()
+        except Exception as e:
+            logger.debug(f"음성 클라이언트 연결 해제 중 오류 (무시됨): {e}")
+        
         self.voice_channel = None
         self.current = None
         self.loop = False
         self.queue_loop = False
+        
+        # 메시지 삭제
         await self.delete_messages()
+        
+        # 모든 백그라운드 태스크 취소
+        for task in self._tasks:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    logger.debug(f"태스크 취소 중 오류 (무시됨): {e}")
+        
+        self._tasks.clear()
+        
+        # 이벤트 리스너 제거
+        if self._voice_state_listener:
+            try:
+                self.bot.remove_listener(self._voice_state_listener, 'on_voice_state_update')
+            except Exception as e:
+                logger.debug(f"이벤트 리스너 제거 중 오류 (무시됨): {e}")
+            self._voice_state_listener = None
 
     async def create_player_message(self):
         view = View(timeout=None)
@@ -567,6 +734,11 @@ class MusicPlayer:
         await self.update_button_styles(view)
 
         try:
+            # 재생 시작 시간 기록
+            import time
+            self.playback_start_time = time.time()
+            self.paused_at_position = 0
+            
             self.guild.voice_client.play(
                 discord.FFmpegPCMAudio(source['url'], executable=ffmpeg_path,
                                        before_options=ffmpeg_options['before_options'],
@@ -581,4 +753,77 @@ class MusicPlayer:
             
             if self.random_play:
                 await asyncio.sleep(1)
+
+    def lower_volume_for_tts(self):
+        """TTS 재생을 위해 음악 볼륨을 50%로 낮춥니다."""
+        if self.guild.voice_client and self.guild.voice_client.source:
+            # 원래 볼륨 저장
+            if hasattr(self.guild.voice_client.source, 'volume'):
+                self.original_volume = self.guild.voice_client.source.volume
+                # 볼륨을 50%로 감소
+                self.guild.voice_client.source.volume = self.original_volume * 0.5
+                logger.debug(f"음악 볼륨을 {self.original_volume * 100:.0f}%에서 {self.original_volume * 50:.0f}%로 감소")
+                return True
+        return False
+
+    def restore_volume_after_tts(self):
+        """TTS 재생 후 음악 볼륨을 원래대로 복원합니다."""
+        if self.guild.voice_client and self.guild.voice_client.source:
+            if hasattr(self.guild.voice_client.source, 'volume'):
+                self.guild.voice_client.source.volume = self.original_volume
+                logger.debug(f"음악 볼륨을 {self.original_volume * 100:.0f}%로 복원")
+                return True
+        return False
+
+    async def resume_after_tts(self):
+        """TTS 재생 후 음악을 일시정지된 위치부터 다시 재생합니다."""
+        if not self.current:
+            logger.warning("재생할 음악 정보가 없습니다.")
+            return False
+        
+        if not self.guild.voice_client:
+            logger.warning("voice_client가 없습니다.")
+            return False
+        
+        try:
+            # 현재 재생 중인 것이 있으면 중지
+            if self.guild.voice_client.is_playing():
+                self.guild.voice_client.stop()
+            
+            # 저장된 current 정보로 음악 재생
+            source = self.current
+            
+            # 일시정지된 위치부터 재생하기 위한 FFmpeg 옵션
+            resume_position = int(self.paused_at_position)
+            if resume_position > 0:
+                # -ss 옵션으로 특정 시간부터 재생
+                before_opts = f"{ffmpeg_options['before_options']} -ss {resume_position}"
+                logger.debug(f"음악 재생 재개 위치: {resume_position}초부터")
+            else:
+                before_opts = ffmpeg_options['before_options']
+                logger.debug("음악 재생 재개 위치: 처음부터 (첫 TTS 호출)")
+            
+            # 재생 시작 시간 기록 (재개 위치를 고려하여 설정)
+            # 일시정지 시점의 위치를 유지하기 위해 현재 시간에서 일시정지 위치를 뺀 값으로 설정
+            import time
+            current_time = time.time()
+            self.playback_start_time = current_time - resume_position
+            # 일시정지 플래그 해제 (위치 추적 재개)
+            self.paused_at_time = None
+            self.last_position_update = current_time
+            
+            self.guild.voice_client.play(
+                discord.FFmpegPCMAudio(source['url'], executable=ffmpeg_path,
+                                       before_options=before_opts,
+                                       options=ffmpeg_options['options']),
+                after=lambda _: self.bot.loop.call_soon_threadsafe(self.next.set)
+            )
+            self.guild.voice_client.source = discord.PCMVolumeTransformer(self.guild.voice_client.source)
+            self.guild.voice_client.source.volume = self.volume
+            
+            logger.debug(f"음악 재생 재개: {source.get('title', '알 수 없음')} ({resume_position}초부터)")
+            return True
+        except Exception as e:
+            logger.error(f"음악 재생 재개 중 오류: {e}", exc_info=True)
+            return False
 

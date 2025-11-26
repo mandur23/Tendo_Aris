@@ -7,9 +7,13 @@ from utils.config import USE_MYSQL
 
 logger = logging.getLogger(__name__)
 
-HISTORY_FILE = 'history.json'
-PLAYLISTS_FILE = 'playlists.json'
-TTS_SETTINGS_FILE = 'tts_settings.json'
+# 데이터 디렉토리
+DATA_DIR = Path('data')
+DATA_DIR.mkdir(exist_ok=True)
+
+HISTORY_FILE = str(DATA_DIR / 'history.json')
+PLAYLISTS_FILE = str(DATA_DIR / 'playlists.json')
+TTS_SETTINGS_FILE = str(DATA_DIR / 'tts_settings.json')
 LOGS_DIR = Path('logs')
 
 

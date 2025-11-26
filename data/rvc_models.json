@@ -1,0 +1,9 @@
+{
+    "chisajp_e440_s12320_rvcv2_rmvpe": {
+        "model_path": "C:\\Users\\User\\PycharmProjects\\Tendo_Aris\\models\\ChisaJP_e440_s12320_RVCv2_RMVPE\\ChisaJP_e440_s12320.pth",
+        "index_path": "C:\\Users\\User\\PycharmProjects\\Tendo_Aris\\models\\ChisaJP_e440_s12320_RVCv2_RMVPE\\added_IVF736_Flat_nprobe_1_ChisaJP_v2.index",
+        "name": "ChisaJP_e440_s12320_RVCv2_RMVPE",
+        "lang": "ja",
+        "is_rvc": true
+    }
+}

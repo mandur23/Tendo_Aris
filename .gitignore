@@ -39,10 +39,19 @@ wheels/
 logs/
 
 # JSON 데이터 파일 (사용자 데이터)
+data/
 history.json
 playlists.json
 tts_settings.json
 *.json.bak
+
+# 모델 파일 및 폴더
+models/
+*.pt
+*.pth
+*.index
+hubert_base.pt
+rmvpe.pt
 
 # 임시 파일
 *.tmp

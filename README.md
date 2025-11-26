@@ -23,10 +23,15 @@
 - **자동 읽기 모드**: 채팅 메시지를 자동으로 음성으로 읽어줌
 - **즉시 읽기**: 특정 텍스트를 바로 읽어줌
 - **다양한 TTS 엔진 지원**:
-  - **gTTS (Google TTS)**: 빠르고 간단한 TTS
-  - **Coqui TTS**: 고품질 TTS, 커스텀 모델 지원 (선택사항)
-- **다양한 목소리 모델**: 언어별 다양한 목소리 선택 가능
-- **느린 속도 모드**: 더 천천히 읽기
+  - **gTTS (Google TTS)**: 빠르고 간단한 TTS, 다양한 언어 지원
+  - **RVC (TTS + RVC)**: 텍스트를 원하는 목소리로 변환하는 고품질 TTS
+    - Edge TTS와 RVC를 결합하여 자연스러운 음성 생성
+    - 커스텀 RVC 모델 지원
+    - 모델 인스턴스 캐싱으로 빠른 처리 속도
+- **다양한 목소리 모델**: 
+  - gTTS: 언어별 다양한 목소리 선택 가능
+  - RVC: 등록된 RVC 모델 사용 가능
+- **느린 속도 모드**: 더 천천히 읽기 (gTTS만 지원)
 - **대기열 시스템**: 여러 메시지를 순서대로 읽기
 
 ### 🎲 야추 다이스 게임
@@ -74,7 +79,8 @@ pip install -r requirements.txt
 - `PyMySQL>=1.1.0` - MySQL 드라이버 (선택사항)
 
 **선택적 패키지:**
-- `TTS>=0.20.0` - Coqui TTS (Python 3.12 미지원, Python 3.11 이하 권장)
+- `tts-with-rvc-onnx>=0.1.0` - RVC TTS 지원 (ONNX 런타임 사용, 권장)
+- 또는 `tts-with-rvc>=0.1.0` - RVC TTS 지원 (PyTorch 사용)
 
 ### 3. 환경 설정
 
@@ -175,14 +181,26 @@ python bot.py
 |--------|------|------|
 | `!tts` | `!말하기`, `!읽기`, `!읽어줘` | TTS 자동 읽기 모드 토글 또는 텍스트 읽기 |
 | `!tts <텍스트>` | - | 특정 텍스트를 즉시 읽어줌 |
-| `!tts목소리` | `!ttsvoice`, `!tts모델`, `!목소리변경` | TTS 목소리 모델 변경 (gTTS/Coqui TTS) |
-| `!tts느리게` | `!ttsslow` | TTS 느린 속도 모드 토글 |
+| `!tts목소리` | `!ttsvoice`, `!tts모델`, `!목소리변경` | TTS 엔진 및 목소리 모델 변경 (gTTS/RVC) |
+| `!tts느리게` | `!ttsslow` | TTS 느린 속도 모드 토글 (gTTS만 지원) |
 | `!tts설정` | `!ttssettings` | 현재 TTS 설정 확인 |
+| `!ttsrvc모델추가` | - | RVC 모델 수동 추가 |
+| `!ttsrvc모델목록` | - | 등록된 RVC 모델 목록 확인 |
+| `!ttsrvc모델삭제` | - | RVC 모델 삭제 |
+| `!ttsrvc자동등록` | - | models 폴더에서 RVC 모델 자동 등록 |
+| `!ttsrvc사용` | - | RVC TTS 사용 설정 |
+| `!ttsrvc끄기` | - | RVC TTS 비활성화 (gTTS로 전환) |
 
 **TTS 사용법:**
 - `!tts` - 자동 읽기 모드 켜기/끄기
 - `!tts 안녕하세요` - "안녕하세요"를 즉시 읽어줌
-- `!tts목소리` - 목소리 모델 선택 (gTTS 또는 Coqui TTS)
+- `!tts목소리` - TTS 엔진 및 목소리 모델 선택 (gTTS 또는 RVC)
+
+**RVC TTS 사용법:**
+1. RVC 모델 준비: `models` 폴더에 RVC 모델 파일(.pth, .index) 배치
+2. 자동 등록: `!ttsrvc자동등록` 명령어로 모델 자동 등록
+3. RVC 사용: `!tts목소리` 명령어로 RVC 엔진 선택 후 모델 선택
+4. 모델 관리: `!ttsrvc모델목록`으로 등록된 모델 확인
 
 ### 🎲 게임 명령어
 
@@ -254,7 +272,7 @@ Tendo_Aris/
 │   ├── discord_utils.py        # Discord 유틸리티
 │   ├── file_utils.py           # 파일 I/O 유틸리티
 │   ├── tts_utils.py            # TTS 유틸리티 (gTTS)
-│   ├── coqui_tts_utils.py      # Coqui TTS 유틸리티
+│   ├── rvc_utils.py            # RVC TTS 유틸리티
 │   └── ytdl_utils.py           # YouTube 다운로더 유틸리티
 │
 ├── logs/                       # 로그 파일 디렉토리
@@ -262,9 +280,13 @@ Tendo_Aris/
 │   │   └── MM/                 # 월별 폴더 (예: 11)
 │   │       └── yacht_bot_YYYY-MM-DD.log  # 날짜별 로그 파일
 │
-├── playlists.json              # 플레이리스트 데이터 (JSON 모드, 자동 생성)
-├── history.json                # 재생 기록 데이터 (JSON 모드, 자동 생성)
-├── tts_settings.json           # TTS 설정 데이터 (자동 생성)
+├── data/                       # 데이터 파일 디렉토리
+│   ├── playlists.json          # 플레이리스트 데이터 (JSON 모드, 자동 생성)
+│   ├── history.json            # 재생 기록 데이터 (JSON 모드, 자동 생성)
+│   ├── tts_settings.json       # TTS 설정 데이터 (자동 생성)
+│   └── rvc_models.json         # RVC 모델 설정 데이터 (자동 생성)
+├── models/                     # RVC 모델 디렉토리
+│   └── [RVC 모델 폴더들]       # .pth 및 .index 파일 포함
 ├── init_database.py            # MySQL 데이터베이스 초기화 스크립트
 └── migrate_to_mysql.py         # JSON → MySQL 마이그레이션 스크립트
 ```
@@ -354,9 +376,15 @@ USE_MYSQL = False                 # MySQL 사용 여부 (True면 MySQL, False면
 - 게임장(첫 번째 참가자)만 `!시작` 명령어 사용 가능
 
 #### 4. TTS가 작동하지 않음
-- Coqui TTS 사용 시 Python 버전 확인 (3.9~3.11 권장)
-- Python 3.12에서는 Coqui TTS 미지원, gTTS만 사용 가능
+- gTTS는 기본적으로 작동하며 추가 설정 불필요
+- RVC TTS 사용 시 `tts-with-rvc-onnx` 또는 `tts-with-rvc` 패키지 설치 필요
 - `!tts목소리` 명령어로 TTS 엔진 확인
+- RVC 모델이 등록되어 있는지 `!ttsrvc모델목록`으로 확인
+
+#### 5. RVC TTS가 느림
+- 첫 사용 시 모델 로딩으로 인해 느릴 수 있음 (정상)
+- 이후 사용 시 인스턴스 캐싱으로 빠르게 처리됨
+- 동일한 모델을 반복 사용하면 속도가 향상됨
 
 #### 5. 명령어를 찾을 수 없음
 - 봇이 명령어 자동 완성 기능을 제공 (오타 시 비슷한 명령어 제안)
@@ -428,7 +456,8 @@ Get-Content logs/2025/11/yacht_bot_2025-11-19.log -Wait
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) - YouTube 다운로더
 - [FFmpeg](https://ffmpeg.org/) - 음성 처리
 - [gTTS](https://github.com/pndurette/gTTS) - Google Text-to-Speech
-- [Coqui TTS](https://github.com/coqui-ai/TTS) - 고품질 TTS 엔진
+- [tts-with-rvc](https://github.com/litagin02/tts-with-rvc) - TTS와 RVC를 결합한 라이브러리
+- [Edge TTS](https://github.com/rany2/edge-tts) - Microsoft Edge TTS (RVC와 함께 사용)
 - [RapidFuzz](https://github.com/rapidfuzz/rapidfuzz) - 빠르고 효율적인 문자열 매칭
 - [aiomysql](https://github.com/aio-libs/aiomysql) - MySQL 비동기 연결
 - [PyMySQL](https://github.com/PyMySQL/PyMySQL) - MySQL 드라이버

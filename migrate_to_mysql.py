@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from utils.config import USE_MYSQL
 from utils.db_utils import init_db_pool, close_db_pool, add_history_item_to_db, save_playlist_to_db
 from utils.file_utils import HISTORY_FILE, PLAYLISTS_FILE
+from pathlib import Path
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
