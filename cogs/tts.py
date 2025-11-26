@@ -433,16 +433,11 @@ class TTS(commands.Cog):
             )
             
             if new_state:
-                try:
-                    await ctx.author.send("선생님, 이제부터 선생님의 채팅을 자동으로 읽어드릴게요! `!tts목소리` 명령어로 목소리를 바꿀 수 있어요~", delete_after=10)
-                except (discord.Forbidden, discord.HTTPException):
-                    # DM을 보낼 수 없는 경우 일반 채널에 ephemeral 스타일로 표시 (하지만 일반 메시지이므로 짧게)
-                    await ctx.send("선생님, 이제부터 선생님의 채팅을 자동으로 읽어드릴게요! `!tts목소리` 명령어로 목소리를 바꿀 수 있어요~", delete_after=5)
+                # 명령어 실행자에게만 보이도록 매우 짧게 표시
+                await ctx.send(f"{ctx.author.mention}, 이제부터 선생님의 채팅을 자동으로 읽어드릴게요! `!tts목소리` 명령어로 목소리를 바꿀 수 있어요~", delete_after=2)
             else:
-                try:
-                    await ctx.author.send("선생님, TTS 자동 읽기 모드를 껐어요. 다시 켜려면 `!tts`를 입력해주세요!", delete_after=10)
-                except (discord.Forbidden, discord.HTTPException):
-                    await ctx.send("선생님, TTS 자동 읽기 모드를 껐어요. 다시 켜려면 `!tts`를 입력해주세요!", delete_after=5)
+                # 명령어 실행자에게만 보이도록 매우 짧게 표시
+                await ctx.send(f"{ctx.author.mention}, TTS 자동 읽기 모드를 껐어요. 다시 켜려면 `!tts`를 입력해주세요!", delete_after=2)
             
             await self.delete_command_message(ctx)
             return
