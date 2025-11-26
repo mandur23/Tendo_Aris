@@ -53,7 +53,7 @@ async def run_bot(bot: FuzzyBot):
     # 토큰 검증
     if not DISCORD_BOT_TOKEN:
         logger.error("DISCORD_BOT_TOKEN이 설정되지 않았습니다. TOKEN.env 파일을 확인해주세요.")
-        sys.exit(1)
+        raise ValueError("DISCORD_BOT_TOKEN이 설정되지 않았습니다.")
     
     try:
         async with bot:
@@ -88,8 +88,10 @@ async def run_bot(bot: FuzzyBot):
         logger.info("키보드 인터럽트로 봇을 종료합니다.")
     except Exception as e:
         logger.error(f"봇 실행 중 오류 발생: {e}", exc_info=True)
+        raise
     finally:
-        await cleanup_bot(bot)
+        if 'bot' in locals():
+            await cleanup_bot(bot)
         logger.info("봇이 정상적으로 종료되었습니다.")
 
 

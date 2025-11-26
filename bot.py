@@ -19,6 +19,10 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("프로그램이 종료되었습니다.")
+    except ValueError as e:
+        # 토큰 검증 실패 등 설정 오류
+        logger.error(f"설정 오류: {e}")
+        sys.exit(1)
     except Exception as e:
         logger.error(f"프로그램 실행 중 오류: {e}", exc_info=True)
         sys.exit(1)
