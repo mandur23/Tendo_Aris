@@ -314,6 +314,21 @@ MYSQL_DATABASE=tendo_aris
 MYSQL_CHARSET=utf8mb4
 ```
 
+**연결 감지/워치독 설정 (선택):**
+```env
+# 오프라인 알림용 웹훅 (선택)
+OFFLINE_ALERT_WEBHOOK_URL=https://discord.com/api/webhooks/...
+
+# 시작 후 연결이 안 될 때 재시작까지 대기 시간 (초)
+OFFLINE_STARTUP_GRACE_SECONDS=300
+
+# 오프라인 지속 시 자동 재시작 기준 시간 (초)
+OFFLINE_RESTART_SECONDS=1800
+
+# 오프라인 자동 재시작 활성화 여부
+AUTO_RESTART_ON_OFFLINE=true
+```
+
 ### 코드 내 설정 (`utils/config.py`)
 
 주요 설정값들:
@@ -336,6 +351,12 @@ BASE_DELAY = 2                    # 재시도 기본 지연 시간 (초)
 
 # 메시지 삭제 지연
 COMMAND_MESSAGE_DELETE_DELAY = 3  # 명령어 메시지 삭제 지연 (초)
+
+# 연결/오프라인 감지 및 재시작
+OFFLINE_ALERT_WEBHOOK_URL = ''          # 오프라인 알림 웹훅 (선택)
+OFFLINE_STARTUP_GRACE_SECONDS = 300     # 시작 후 유예 시간 (초)
+OFFLINE_RESTART_SECONDS = 1800          # 오프라인 재시작 기준 (초)
+AUTO_RESTART_ON_OFFLINE = True          # 오프라인 자동 재시작 여부
 
 # MySQL 데이터베이스 설정
 MYSQL_HOST = 'localhost'          # MySQL 호스트

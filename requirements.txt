@@ -18,3 +18,8 @@ cryptography>=41.0.0  # MySQL sha256_password/caching_sha2_password 인증을 �
 # tts-with-rvc-onnx: ONNX 런타임 사용 (권장, 더 빠름)
 tts-with-rvc-onnx>=0.1.0  # TTS와 RVC를 결합한 라이브러리 (텍스트를 바로 원하는 목소리로 변환)
 # 또는 tts-with-rvc>=0.1.0  # PyTorch 사용 버전
+
+# Supertonic TTS 지원 (초고속 온디바이스 TTS)
+onnxruntime>=1.16.0  # Supertonic TTS를 위한 ONNX Runtime
+numpy>=1.24.0  # Supertonic TTS를 위한 NumPy
+huggingface_hub>=0.19.0  # Supertonic 모델 다운로드를 위한 Hugging Face Hub (선택사항)

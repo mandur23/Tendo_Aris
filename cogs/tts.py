@@ -12,6 +12,10 @@ from utils.rvc_utils import (
     get_all_rvc_models, get_rvc_model, text_to_speech_with_rvc_async,
     scan_and_register_rvc_models
 )
+from utils.supertonic_utils import (
+    check_supertonic_available, text_to_speech_supertonic,
+    check_supertonic_model_exists, download_supertonic_model
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +46,9 @@ class TTS(commands.Cog):
                 'voice_model': '기본',
                 'slow': False,
                 'use_rvc': False,  # RVC 사용 여부
-                'rvc_model': None  # RVC 모델 이름
+                'rvc_model': None,  # RVC 모델 이름
+                'use_supertonic': False,  # Supertonic 사용 여부
+                'supertonic_voice': 'default'  # Supertonic 음성 프리셋
             }
         return self.tts_settings[user_key]
 
@@ -65,7 +71,7 @@ class TTS(commands.Cog):
         return settings.get('enabled', False)
 
 
-    async def play_tts(self, ctx, text: str, lang: str = 'ko', voice_model: str = '기본', slow: bool = False, use_rvc: bool = False, rvc_model: str = None):
+    async def play_tts(self, ctx, text: str, lang: str = 'ko', voice_model: str = '기본', slow: bool = False, use_rvc: bool = False, rvc_model: str = None, use_supertonic: bool = False, supertonic_voice: str = 'default'):
         """TTS를 재생합니다."""
         tts_file = None
         try:
@@ -84,6 +90,28 @@ class TTS(commands.Cog):
             if not ctx.voice_client:
                 logger.error("voice_client가 없습니다. 음성 채널에 연결되어 있지 않습니다.")
                 return False
+            
+            # Supertonic 사용 (가장 빠른 TTS)
+            if use_supertonic:
+                if check_supertonic_available():
+                    if not check_supertonic_model_exists():
+                        logger.warning("Supertonic 모델이 없습니다. gTTS로 폴백합니다.")
+                        use_supertonic = False
+                    else:
+                        try:
+                            import asyncio
+                            loop = asyncio.get_event_loop()
+                            tts_file = await loop.run_in_executor(
+                                None,
+                                lambda: text_to_speech_supertonic(text, voice_preset=supertonic_voice)
+                            )
+                            logger.info(f"Supertonic TTS 파일 생성 완료: {supertonic_voice}")
+                        except Exception as e:
+                            logger.error(f"Supertonic TTS 생성 실패: {e}, gTTS로 폴백합니다.")
+                            use_supertonic = False
+                else:
+                    logger.warning("Supertonic을 사용할 수 없습니다. pip install onnxruntime로 설치하세요. gTTS로 폴백합니다.")
+                    use_supertonic = False
             
             # RVC 사용 (TTS + RVC 결합)
             if use_rvc:
@@ -107,8 +135,8 @@ class TTS(commands.Cog):
                     logger.warning("RVC를 사용할 수 없습니다. pip install tts-with-rvc-onnx 또는 pip install tts-with-rvc로 설치하세요. gTTS로 폴백합니다.")
                     use_rvc = False
             
-            # RVC를 사용하지 않는 경우 gTTS 사용
-            if not use_rvc:
+            # Supertonic과 RVC를 사용하지 않는 경우 gTTS 사용
+            if not use_supertonic and not use_rvc:
                 tld = 'com'  # 기본값
                 if lang in VOICE_MODELS and voice_model in VOICE_MODELS[lang]:
                     tld = VOICE_MODELS[lang][voice_model]['tld']
@@ -339,7 +367,9 @@ class TTS(commands.Cog):
                 settings.get('voice_model', '기본'),
                 settings.get('slow', False),
                 settings.get('use_rvc', False),
-                settings.get('rvc_model', None)
+                settings.get('rvc_model', None),
+                settings.get('use_supertonic', False),
+                settings.get('supertonic_voice', 'default')
             )
             
             # 재생 성공 시 종료 (재생 완료 후 _cleanup_after_play에서 다음 항목 처리)
@@ -457,7 +487,9 @@ class TTS(commands.Cog):
                 settings.get('voice_model', '기본'),
                 settings.get('slow', False),
                 settings.get('use_rvc', False),
-                settings.get('rvc_model', None)
+                settings.get('rvc_model', None),
+                settings.get('use_supertonic', False),
+                settings.get('supertonic_voice', 'default')
             )
             
             if success:
@@ -480,16 +512,28 @@ class TTS(commands.Cog):
         
         # RVC 사용 가능 여부 확인
         rvc_available = _check_rvc_available()
+        supertonic_available = check_supertonic_available()
         
-        # TTS 엔진 선택 (gTTS 또는 RVC)
+        # TTS 엔진 선택 (gTTS, Supertonic, 또는 RVC)
         engine_options = [
             discord.SelectOption(
                 label="gTTS (Google TTS)",
                 value="gtts",
-                description="빠르고 간단한 TTS",
-                default=not use_rvc
+                description="빠르고 간단한 TTS, 다양한 언어 지원",
+                default=not use_rvc and not use_supertonic
             )
         ]
+        
+        # Supertonic 옵션 추가 (사용 가능한 경우만)
+        if supertonic_available:
+            engine_options.append(
+                discord.SelectOption(
+                    label="Supertonic (⚡ 초고속 TTS)",
+                    value="supertonic",
+                    description="가장 빠른 온디바이스 TTS (영어만 지원)",
+                    default=use_supertonic
+                )
+            )
         
         # RVC 옵션 추가 (사용 가능한 경우만)
         if rvc_available:
@@ -498,11 +542,16 @@ class TTS(commands.Cog):
                     label="RVC (TTS + RVC)",
                     value="rvc",
                     description="텍스트를 원하는 목소리로 변환",
-                    default=use_rvc
+                    default=use_rvc and not use_supertonic
                 )
             )
         
-        current_engine = "RVC" if use_rvc else "gTTS"
+        if use_supertonic:
+            current_engine = "Supertonic"
+        elif use_rvc:
+            current_engine = "RVC"
+        else:
+            current_engine = "gTTS"
         
         engine_select = discord.ui.Select(
             placeholder=f"TTS 엔진 선택 (현재: {current_engine})",
@@ -516,11 +565,13 @@ class TTS(commands.Cog):
             
             selected_engine = engine_select.values[0]
             new_use_rvc = (selected_engine == 'rvc')
+            new_use_supertonic = (selected_engine == 'supertonic')
             
             self.set_user_settings(
                 ctx.author.id,
                 ctx.guild.id,
-                use_rvc=new_use_rvc
+                use_rvc=new_use_rvc,
+                use_supertonic=new_use_supertonic
             )
             
             # 설정 업데이트 후 즉시 모델 선택 UI 표시
@@ -578,6 +629,54 @@ class TTS(commands.Cog):
                 
                 await interaction.response.send_message(
                     "선생님, RVC로 변경했어요! 아래에서 RVC 모델을 선택해주세요!",
+                    view=updated_view,
+                    ephemeral=True,
+                    delete_after=30
+                )
+            elif new_use_supertonic:
+                # Supertonic 음성 프리셋 선택 UI 표시
+                # Supertonic은 기본적으로 영어만 지원하며, 음성 프리셋을 선택할 수 있습니다.
+                # 실제 프리셋 목록은 모델에 따라 다를 수 있습니다.
+                supertonic_voices = ['default', 'male', 'female']  # 예시 프리셋 목록
+                
+                voice_options = [
+                    discord.SelectOption(
+                        label=f"🎤 {voice}",
+                        value=voice,
+                        description=f"Supertonic - {voice} voice",
+                        default=(voice == updated_settings.get('supertonic_voice', 'default'))
+                    )
+                    for voice in supertonic_voices
+                ]
+                
+                voice_select = discord.ui.Select(
+                    placeholder=f"Supertonic 음성 선택 (현재: {updated_settings.get('supertonic_voice', 'default')})",
+                    options=voice_options
+                )
+                
+                async def supertonic_voice_callback_inner(inner_interaction):
+                    if inner_interaction.user.id != ctx.author.id:
+                        await inner_interaction.response.send_message("선생님, 다른 사람의 설정을 변경할 수 없어요!", ephemeral=True)
+                        return
+                    
+                    selected_voice = voice_select.values[0]
+                    self.set_user_settings(
+                        ctx.author.id,
+                        ctx.guild.id,
+                        supertonic_voice=selected_voice
+                    )
+                    
+                    await inner_interaction.response.send_message(
+                        f"선생님, Supertonic 음성을 '{selected_voice}'로 변경했어요!",
+                        ephemeral=True,
+                        delete_after=5
+                    )
+                
+                voice_select.callback = supertonic_voice_callback_inner
+                updated_view.add_item(voice_select)
+                
+                await interaction.response.send_message(
+                    "선생님, Supertonic으로 변경했어요! 아래에서 음성 프리셋을 선택해주세요! (참고: Supertonic은 영어만 지원합니다)",
                     view=updated_view,
                     ephemeral=True,
                     delete_after=30
@@ -642,6 +741,47 @@ class TTS(commands.Cog):
         engine_select.callback = engine_select_callback
         view.add_item(engine_select)
         
+        # Supertonic을 사용하는 경우
+        if use_supertonic and supertonic_available:
+            # Supertonic 음성 프리셋 선택
+            supertonic_voices = ['default', 'male', 'female']  # 예시 프리셋 목록
+            
+            voice_options = [
+                discord.SelectOption(
+                    label=f"⚡ {voice}",
+                    value=voice,
+                    description=f"Supertonic - {voice} voice",
+                    default=(voice == supertonic_voice)
+                )
+                for voice in supertonic_voices
+            ]
+            
+            voice_select = discord.ui.Select(
+                placeholder=f"Supertonic 음성 선택 (현재: {supertonic_voice})",
+                options=voice_options
+            )
+            
+            async def supertonic_voice_callback(interaction):
+                if interaction.user.id != ctx.author.id:
+                    await interaction.response.send_message("선생님, 다른 사람의 설정을 변경할 수 없어요!", ephemeral=True)
+                    return
+                
+                selected_voice = voice_select.values[0]
+                self.set_user_settings(
+                    ctx.author.id,
+                    ctx.guild.id,
+                    supertonic_voice=selected_voice
+                )
+                
+                await interaction.response.send_message(
+                    f"선생님, Supertonic 음성을 '{selected_voice}'로 변경했어요!",
+                    ephemeral=True,
+                    delete_after=5
+                )
+            
+            voice_select.callback = supertonic_voice_callback
+            view.add_item(voice_select)
+        
         # RVC를 사용하는 경우
         if use_rvc and rvc_available:
             rvc_models = get_all_rvc_models()
@@ -690,7 +830,7 @@ class TTS(commands.Cog):
             view.add_item(rvc_model_select)
         
         # gTTS를 사용하는 경우
-        if not use_rvc:
+        if not use_rvc and not use_supertonic:
             if current_lang not in VOICE_MODELS:
                 await ctx.send(f"선생님, '{current_lang}' 언어는 지원되지 않아요!", delete_after=12)
                 await self.delete_command_message(ctx)
@@ -809,7 +949,10 @@ class TTS(commands.Cog):
         rvc_model = settings.get('rvc_model', None)
         
         # 모델 이름 가져오기
-        if use_rvc:
+        if use_supertonic:
+            model_name = f"Supertonic ({supertonic_voice})"
+            engine_name = "Supertonic ⚡"
+        elif use_rvc:
             rvc_info = get_rvc_model(rvc_model) if rvc_model else None
             if rvc_info:
                 model_name = rvc_info.get('name', rvc_model)
@@ -831,7 +974,10 @@ class TTS(commands.Cog):
         embed.add_field(name="언어", value=lang.upper(), inline=True)
         embed.add_field(name="목소리 모델", value=model_name, inline=True)
         embed.add_field(name="느린 속도", value="켜짐 ✅" if slow else "꺼짐 ❌", inline=True)
+        if use_supertonic:
+            embed.add_field(name="Supertonic 음성", value=f"⚡ {supertonic_voice}", inline=True)
         if use_rvc:
+            rvc_info = get_rvc_model(rvc_model) if rvc_model else None
             embed.add_field(name="RVC 모델", value=f"🎤 {rvc_info.get('name', rvc_model) if rvc_info else rvc_model}", inline=True)
         
         await ctx.send(embed=embed, delete_after=30)

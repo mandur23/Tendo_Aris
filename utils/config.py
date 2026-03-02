@@ -46,6 +46,12 @@ BASE_DELAY = 2
 # 메시지 삭제 지연
 COMMAND_MESSAGE_DELETE_DELAY = 3  # 초
 
+# 연결/오프라인 감지 및 재시작 설정
+OFFLINE_ALERT_WEBHOOK_URL = os.getenv('OFFLINE_ALERT_WEBHOOK_URL', '').strip()
+OFFLINE_STARTUP_GRACE_SECONDS = int(os.getenv('OFFLINE_STARTUP_GRACE_SECONDS', '300'))
+OFFLINE_RESTART_SECONDS = int(os.getenv('OFFLINE_RESTART_SECONDS', '1800'))
+AUTO_RESTART_ON_OFFLINE = os.getenv('AUTO_RESTART_ON_OFFLINE', 'true').lower() == 'true'
+
 # MySQL 데이터베이스 설정
 MYSQL_HOST = os.getenv('MYSQL_HOST', 'localhost')
 MYSQL_PORT = int(os.getenv('MYSQL_PORT', '3306'))
