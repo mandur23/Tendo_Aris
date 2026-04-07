@@ -9,6 +9,7 @@ from cogs.music import Music
 from cogs.tts import TTS
 from GameSystem.YachtDiceGame import YachtDiceGame
 from utils.config import DISCORD_BOT_TOKEN, COMMAND_PREFIX
+from utils.db_utils import close_db_pool
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,9 @@ async def cleanup_bot(bot: FuzzyBot):
             await music_cog.cog_unload()
     except Exception as e:
         logger.debug(f"봇 종료 시 Cog 언로드 중 오류 (무시됨): {e}")
+    
+    # DB 연결 풀 명시적 종료
+    await close_db_pool()
     
     # 봇 종료
     if not bot.is_closed():

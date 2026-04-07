@@ -58,9 +58,20 @@ BASE_DELAY = 2
 # 메시지 삭제 지연
 COMMAND_MESSAGE_DELETE_DELAY = 3  # 초
 
+# 연결/오프라인 감지 및 재시작 설정
+OFFLINE_ALERT_WEBHOOK_URL = os.getenv('OFFLINE_ALERT_WEBHOOK_URL', '').strip()
+OFFLINE_STARTUP_GRACE_SECONDS = int(os.getenv('OFFLINE_STARTUP_GRACE_SECONDS', '300'))
+OFFLINE_RESTART_SECONDS = int(os.getenv('OFFLINE_RESTART_SECONDS', '1800'))
+AUTO_RESTART_ON_OFFLINE = os.getenv('AUTO_RESTART_ON_OFFLINE', 'true').lower() == 'true'
+
 # MySQL 데이터베이스 설정
 MYSQL_HOST = os.getenv('MYSQL_HOST', 'localhost')
-MYSQL_PORT = int(os.getenv('MYSQL_PORT', '3306'))
+try:
+    MYSQL_PORT = int(os.getenv('MYSQL_PORT', '3306'))
+except (TypeError, ValueError):
+    MYSQL_PORT = 3306
+    if os.getenv('MYSQL_PORT') is not None:
+        logger.warning("MYSQL_PORT가 숫자가 아니에요. 3306을 사용할게요. TOKEN.env에서 MYSQL_PORT를 숫자(예: 3306)로 설정해주세요.")
 MYSQL_USER = os.getenv('MYSQL_USER', 'root')
 MYSQL_PASSWORD = os.getenv('MYSQL_PASSWORD', '')
 MYSQL_DATABASE = os.getenv('MYSQL_DATABASE', 'tendo_aris')

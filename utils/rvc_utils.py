@@ -372,6 +372,10 @@ def text_to_speech_with_rvc(
             # output_directory는 디렉토리 경로여야 하며, 파일 경로가 아닙니다.
             output_dir = str(output_path.parent)
             
+            # 출력 디렉토리가 존재하는지 확인하고 없으면 생성
+            output_dir_path = Path(output_dir)
+            output_dir_path.mkdir(parents=True, exist_ok=True)
+            
             logger.info(f"RVC 인스턴스 생성 중: {rvc_model_name} (디바이스: {device}, 처음 사용 시 느릴 수 있습니다)")
             
             try:
@@ -400,23 +404,80 @@ def text_to_speech_with_rvc(
         if not text or len(text.strip()) == 0:
             raise ValueError("텍스트가 비어있습니다.")
         
+        # 텍스트가 너무 짧으면 공백 추가 (Edge TTS가 짧은 텍스트에서 실패할 수 있음)
+        text_to_use = text.strip()
+        if len(text_to_use) < 3:
+            # 매우 짧은 텍스트는 공백을 추가하여 Edge TTS가 처리할 수 있도록 함
+            text_to_use = f" {text_to_use} "
+            logger.debug(f"텍스트가 너무 짧아 공백 추가: '{text_to_use}'")
+        
         # output_filename은 파일 이름만 (확장자 포함)
-        max_retries = 2
+        max_retries = 3
         retry_count = 0
         output_file = None
         
         while retry_count < max_retries:
             try:
+                # TTS_RVC 호출
                 output_file = tts_rvc(
-                    text=text,
+                    text=text_to_use,
                     pitch=pitch,
                     tts_rate=tts_rate,
                     output_filename=output_path.name  # 파일 이름만 (예: "output.wav")
                 )
-                break  # 성공하면 루프 종료
+                
+                # 반환된 경로 확인
+                possible_paths = []
+                
+                if isinstance(output_file, str):
+                    possible_paths.append(Path(output_file))
+                
+                # output_directory에 파일이 생성되었을 수 있음
+                possible_paths.append(Path(output_dir) / output_path.name)
+                
+                # 원래 output_path도 확인
+                possible_paths.append(output_path)
+                
+                # TTS_TEMP_DIR에서도 찾기
+                possible_paths.append(TTS_TEMP_DIR / output_path.name)
+                
+                # 파일 찾기
+                found_file = None
+                for file_path in possible_paths:
+                    if file_path.exists():
+                        file_size = file_path.stat().st_size
+                        if file_size > 0:
+                            found_file = file_path
+                            logger.debug(f"출력 파일 발견: {file_path} (크기: {file_size} bytes)")
+                            break
+                        else:
+                            logger.warning(f"파일이 비어있음: {file_path} (크기: {file_size} bytes)")
+                
+                if found_file:
+                    output_path = found_file
+                    logger.info(f"TTS+RVC 파일 생성 완료: {output_path.name} (크기: {found_file.stat().st_size} bytes, 모델: {rvc_model_name}, 언어: {lang}, voice: {edge_voice}, 텍스트 길이: {len(text)})")
+                    return output_path
+                else:
+                    # 모든 가능한 경로를 시도했지만 파일을 찾지 못함
+                    raise FileNotFoundError(
+                        f"출력 파일이 생성되지 않았습니다: {output_path.name}\n"
+                        f"시도한 경로: {[str(p) for p in possible_paths]}"
+                    )
+                    
             except Exception as e:
                 retry_count += 1
-                logger.warning(f"TTS_RVC 호출 중 오류 (시도 {retry_count}/{max_retries}): {e}, voice={edge_voice}, text_length={len(text)}")
+                error_msg = str(e)
+                logger.warning(f"TTS_RVC 호출 중 오류 (시도 {retry_count}/{max_retries}): {error_msg}, voice={edge_voice}, text_length={len(text_to_use)}, text='{text_to_use[:20]}'")
+                
+                # "No audio was received" 오류는 Edge TTS 문제일 수 있음
+                if "No audio was received" in error_msg or "no audio" in error_msg.lower():
+                    logger.warning("Edge TTS에서 오디오를 받지 못했습니다. 네트워크 문제이거나 Edge TTS API 문제일 수 있습니다.")
+                    # 마지막 시도가 아니면 잠시 대기 후 재시도
+                    if retry_count < max_retries:
+                        import time
+                        wait_time = retry_count * 2  # 2초, 4초 대기
+                        logger.info(f"Edge TTS 재시도 전 {wait_time}초 대기...")
+                        time.sleep(wait_time)
                 
                 if retry_count >= max_retries:
                     # 최대 재시도 횟수 초과 시 인스턴스를 캐시에서 제거하고 오류 발생
@@ -426,8 +487,8 @@ def text_to_speech_with_rvc(
                             del _rvc_instances[cache_key]
                         except:
                             pass
-                    logger.error(f"TTS_RVC 호출 최종 실패: {e}")
-                    raise
+                    logger.error(f"TTS_RVC 호출 최종 실패: {error_msg}")
+                    raise RuntimeError(f"RVC TTS 생성 실패: {error_msg}")
                 else:
                     # 인스턴스 재생성 시도
                     logger.info(f"RVC 인스턴스 재생성 시도...")
@@ -439,6 +500,10 @@ def text_to_speech_with_rvc(
                     
                     # 인스턴스 재생성
                     output_dir = str(output_path.parent)
+                    # 출력 디렉토리가 존재하는지 확인하고 없으면 생성
+                    output_dir_path = Path(output_dir)
+                    output_dir_path.mkdir(parents=True, exist_ok=True)
+                    
                     try:
                         tts_rvc = _TTS_WITH_RVC(
                             model_path=str(rvc_model['model_path']),
@@ -453,13 +518,6 @@ def text_to_speech_with_rvc(
                     except Exception as recreate_error:
                         logger.error(f"RVC 인스턴스 재생성 실패: {recreate_error}")
                         raise
-        
-        # 반환된 경로가 다를 수 있으므로 확인
-        if isinstance(output_file, str):
-            output_path = Path(output_file)
-        
-        logger.info(f"TTS+RVC 파일 생성 완료: {output_path.name} (모델: {rvc_model_name}, 언어: {lang}, voice: {edge_voice}, 텍스트 길이: {len(text)})")
-        return output_path
         
     except Exception as e:
         logger.error(f"TTS+RVC 생성 중 오류: {e}")

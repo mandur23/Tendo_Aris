@@ -1,5 +1,3 @@
-import os
-import sys
 import asyncio
 import logging
 import discord
@@ -80,6 +78,13 @@ class Music(commands.Cog):
 
     async def cog_unload(self):
         """Cog가 언로드될 때 실행됩니다."""
+        for guild_id in list(self.players):
+            try:
+                guild = self.bot.get_guild(guild_id)
+                if guild:
+                    await self.cleanup(guild)
+            except Exception as e:
+                logger.debug(f"cog_unload cleanup guild {guild_id} 중 오류 (무시됨): {e}")
         if USE_MYSQL:
             await close_db_pool()
 
@@ -146,10 +151,11 @@ class Music(commands.Cog):
 
     async def cleanup(self, guild):
         try:
-            await guild.voice_client.disconnect()
-        except AttributeError:
-            pass
-
+            player = self.players.get(guild.id)
+            if player:
+                await player.stop()
+        except Exception as e:
+            logger.debug(f"cleanup 중 player.stop() 오류 (무시됨): {e}")
         try:
             del self.players[guild.id]
         except KeyError:
@@ -223,13 +229,18 @@ class Music(commands.Cog):
         """음악 재생을 종료하고 봇을 음성 채널에서 내보냅니다."""
         player = self.get_player(ctx)
         await player.stop()
+        await self.cleanup(ctx.guild)
         await ctx.send("선생님, 아리스가 음악 재생을 종료하고 음성 채널에서 나갔어요~ 다음에 또 불러주세요!", delete_after=10)
         await delete_command_message(ctx)
 
     @commands.command(aliases=['나가!'])
     async def leave(self, ctx):
         """봇을 음성 채널에서 내보냅니다."""
-        await self.stop(ctx)
+        player = self.get_player(ctx)
+        await player.stop()
+        await self.cleanup(ctx.guild)
+        await ctx.send("선생님, 아리스가 음악 재생을 종료하고 음성 채널에서 나갔어요~ 다음에 또 불러주세요!", delete_after=10)
+        await delete_command_message(ctx)
 
     @commands.command(aliases=['볼륨'])
     async def volume(self, ctx, volume: int):
@@ -1205,13 +1216,6 @@ class Music(commands.Cog):
         message = await ctx.send(embed=embed, view=view)
         view.message = message
         await delete_command_message(ctx)
-
-    @commands.command(name='재시작', aliases=['restart', 'try'])
-    @commands.has_permissions(administrator=True)
-    async def restart(self, ctx):
-        """프로그램을 재시작합니다."""
-        await ctx.send("아리스가 재시작할게요! 잠시만 기다려주세요...", delete_after=5)
-        os.execv(sys.executable, ['python'] + sys.argv)
 
     @commands.command(name='종료봇', aliases=['exit'])
     @commands.has_permissions(administrator=True)

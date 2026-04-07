@@ -4,6 +4,14 @@
     <content url="file://$MODULE_DIR$">
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
       <excludeFolder url="file://$MODULE_DIR$/.venv1" />
+      <excludeFolder url="file://$MODULE_DIR$/.cache/huggingface/download" />
+      <excludeFolder url="file://$MODULE_DIR$/.idea/dataSources" />
+      <excludeFolder url="file://$MODULE_DIR$/logs" />
+      <excludeFolder url="file://$MODULE_DIR$/models/ChisaJP_e440_s12320_RVCv2_RMVPE" />
+      <excludeFolder url="file://$MODULE_DIR$/models/NELL_KLM43x4_Share_Free" />
+      <excludeFolder url="file://$MODULE_DIR$/models/kohane_act2" />
+      <excludeFolder url="file://$MODULE_DIR$/models/shizuku_act2" />
+      <excludeFolder url="file://$MODULE_DIR$/models/supertonic" />
     </content>
     <orderEntry type="jdk" jdkName="Python 3.11 (Tendo_Aris)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />

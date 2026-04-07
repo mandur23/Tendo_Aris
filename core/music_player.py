@@ -1,5 +1,3 @@
-import os
-import sys
 import asyncio
 import random
 import logging
@@ -63,7 +61,10 @@ class MusicPlayer:
 
     @property
     def is_playing(self):
-        return self.guild.voice_client and self.guild.voice_client.is_playing()
+        """현재 재생 중이거나 대기열에 곡이 있는지 확인합니다."""
+        if self._shutdown or self.bot.is_closed():
+            return False
+        return (self.guild.voice_client and (self.guild.voice_client.is_playing() or self.guild.voice_client.is_paused())) or not self.queue.empty()
 
     async def check_idle_timeout(self):
         while not self._shutdown and not self.bot.is_closed():
@@ -74,9 +75,8 @@ class MusicPlayer:
                 if not self.last_activity.is_set():
                     self.inactive_time += 1
                     if self.inactive_time >= self.idle_timeout:
-                        logger.info(f"비활동 시간 {self.idle_timeout}초 초과. 봇을 재시작합니다.")
+                        logger.info(f"비활동 시간 {self.idle_timeout}초 초과. 재생을 중지합니다.")
                         await self.stop()
-                        self.restart_program()
                 else:
                     self.inactive_time = 0
             except asyncio.CancelledError:
@@ -112,10 +112,6 @@ class MusicPlayer:
                 if not self._shutdown:
                     logger.debug(f"재생 위치 추적 중 오류 (무시됨): {e}")
                 await asyncio.sleep(1)
-
-    def restart_program(self):
-        """현재 프로그램을 재시작합니다."""
-        os.execv(sys.executable, ['python'] + sys.argv)
 
     def update_voice_channel(self, channel):
         if channel:
@@ -316,6 +312,9 @@ class MusicPlayer:
                         await self.stop()
                     break
 
+            if source is None:
+                break
+
             if not isinstance(source, dict):
                 try:
                     source = await retry_on_403_error(
@@ -423,9 +422,9 @@ class MusicPlayer:
 
             if self.queue.empty() and not (self.loop or self.queue_loop):
                 await self.delete_messages()
-                await self.stop()
                 if not self._shutdown:
                     await safe_send(self.channel, "선생님, 재생할 곡이 더 이상 없어요. 아리스가 음성 채널에서 나갈게요~", delete_after=10)
+                await self.stop()
                 break
 
     async def delete_messages(self):
@@ -445,18 +444,34 @@ class MusicPlayer:
         
         self._shutdown = True
         
+        # Cog의 players에서 제거하여 재사용 시 새 플레이어가 생성되도록 함
+        try:
+            if self.cog and hasattr(self.cog, 'players'):
+                self.cog.players.pop(self.guild.id, None)
+        except Exception as e:
+            logger.debug(f"players에서 제거 중 오류 (무시됨): {e}")
+
         # 대기 중인 루프 깨우기
         self.next.set()
         
-        # 큐 비우기
-        self.queue._queue.clear()
+        # 큐 비우고 대기 중인 queue.get()을 깨우기 위해 센티넬 투입
+        while not self.queue.empty():
+            try:
+                self.queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        
+        try:
+            self.queue.put_nowait(None)
+        except asyncio.QueueFull:
+            pass
         
         # 음성 클라이언트 연결 해제
         try:
             if self.guild.voice_client:
                 if self.guild.voice_client.is_playing():
                     self.guild.voice_client.stop()
-                await self.guild.voice_client.disconnect()
+                await self.guild.voice_client.disconnect(force=True)
         except Exception as e:
             logger.debug(f"음성 클라이언트 연결 해제 중 오류 (무시됨): {e}")
         
@@ -472,12 +487,9 @@ class MusicPlayer:
         for task in self._tasks:
             if not task.done():
                 task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-                except Exception as e:
-                    logger.debug(f"태스크 취소 중 오류 (무시됨): {e}")
+        
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
         
         self._tasks.clear()
         
@@ -686,11 +698,11 @@ class MusicPlayer:
             return
 
         if self.guild.voice_client is None:
-            if self.channel.guild.me.voice and self.channel.guild.me.voice.channel:
+            if self.voice_channel:
+                await self.voice_channel.connect()
+            elif self.channel.guild.me.voice and self.channel.guild.me.voice.channel:
                 voice_channel = self.channel.guild.me.voice.channel
                 await voice_channel.connect()
-            elif self.channel.author and self.channel.author.voice:
-                await self.channel.author.voice.channel.connect()
             else:
                 return
 
