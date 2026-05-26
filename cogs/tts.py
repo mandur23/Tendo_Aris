@@ -14,7 +14,8 @@ from utils.rvc_utils import (
 )
 from utils.supertonic_utils import (
     check_supertonic_available, text_to_speech_supertonic,
-    check_supertonic_model_exists, download_supertonic_model
+    check_supertonic_model_exists, download_supertonic_model,
+    get_available_voice_presets, DEFAULT_VOICE_PRESET
 )
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,14 @@ class TTS(commands.Cog):
         self.tts_queue = {}
         # 재생 중인지 확인 (guild_id -> bool)
         self.playing = {}
+        # 음성 연결 경합 방지 락 (guild_id -> asyncio.Lock)
+        self._voice_connect_locks = {}
+
+    def _get_voice_connect_lock(self, guild_id: int) -> asyncio.Lock:
+        """길드별 음성 연결 락을 반환합니다."""
+        if guild_id not in self._voice_connect_locks:
+            self._voice_connect_locks[guild_id] = asyncio.Lock()
+        return self._voice_connect_locks[guild_id]
 
     def save_settings(self):
         """TTS 설정을 저장합니다."""
@@ -48,7 +57,7 @@ class TTS(commands.Cog):
                 'use_rvc': False,  # RVC 사용 여부
                 'rvc_model': None,  # RVC 모델 이름
                 'use_supertonic': False,  # Supertonic 사용 여부
-                'supertonic_voice': 'default'  # Supertonic 음성 프리셋
+                'supertonic_voice': DEFAULT_VOICE_PRESET  # Supertonic 음성 프리셋 (M1)
             }
         return self.tts_settings[user_key]
 
@@ -91,26 +100,32 @@ class TTS(commands.Cog):
                 logger.error("voice_client가 없습니다. 음성 채널에 연결되어 있지 않습니다.")
                 return False
             
-            # Supertonic 사용 (가장 빠른 TTS)
+            # Supertonic 사용 (가장 빠른 TTS, 31개 언어 지원)
             if use_supertonic:
                 if check_supertonic_available():
-                    if not check_supertonic_model_exists():
-                        logger.warning("Supertonic 모델이 없습니다. gTTS로 폴백합니다.")
+                    try:
+                        import asyncio
+                        loop = asyncio.get_event_loop()
+                        # 모델 자산이 없으면 라이브러리가 자동 다운로드 (첫 실행 시 ~305MB).
+                        # lang 도 함께 전달해 한국어 등 다국어 합성 지원.
+                        tts_file = await loop.run_in_executor(
+                            None,
+                            lambda: text_to_speech_supertonic(
+                                text,
+                                voice_preset=supertonic_voice,
+                                lang=lang,
+                            ),
+                        )
+                        logger.info(
+                            f"Supertonic TTS 파일 생성 완료: voice={supertonic_voice}, lang={lang}"
+                        )
+                    except Exception as e:
+                        logger.error(f"Supertonic TTS 생성 실패: {e}, gTTS로 폴백합니다.")
                         use_supertonic = False
-                    else:
-                        try:
-                            import asyncio
-                            loop = asyncio.get_event_loop()
-                            tts_file = await loop.run_in_executor(
-                                None,
-                                lambda: text_to_speech_supertonic(text, voice_preset=supertonic_voice)
-                            )
-                            logger.info(f"Supertonic TTS 파일 생성 완료: {supertonic_voice}")
-                        except Exception as e:
-                            logger.error(f"Supertonic TTS 생성 실패: {e}, gTTS로 폴백합니다.")
-                            use_supertonic = False
                 else:
-                    logger.warning("Supertonic을 사용할 수 없습니다. pip install onnxruntime로 설치하세요. gTTS로 폴백합니다.")
+                    logger.warning(
+                        "Supertonic 라이브러리가 설치되지 않았습니다. `pip install supertonic` 로 설치하세요. gTTS로 폴백합니다."
+                    )
                     use_supertonic = False
             
             # RVC 사용 (TTS + RVC 결합)
@@ -319,21 +334,91 @@ class TTS(commands.Cog):
         """명령어 메시지를 삭제합니다."""
         await asyncio.sleep(COMMAND_MESSAGE_DELETE_DELAY)
         try:
+            if self.bot.is_closed():
+                return
             await ctx.message.delete()
-        except (discord.NotFound, discord.HTTPException, discord.Forbidden):
+        except (discord.NotFound, discord.HTTPException, discord.Forbidden, RuntimeError, AttributeError):
             pass
+
+    async def _safe_ctx_send(self, ctx, content: str, delete_after: float = None):
+        """종료 상태를 고려해 안전하게 메시지를 전송합니다."""
+        try:
+            if self.bot.is_closed():
+                return
+            await ctx.send(content, delete_after=delete_after)
+        except (discord.NotFound, discord.HTTPException, discord.Forbidden, RuntimeError, AttributeError):
+            pass
+
+    async def _connect_with_retry(self, channel, guild, max_attempts: int = 3):
+        """음성 채널 연결을 재시도하며 강제 재연결을 수행합니다."""
+        delays = [1.0, 3.0, 5.0]
+        last_error = None
+
+        for attempt in range(max_attempts):
+            if self.bot.is_closed():
+                return False
+            try:
+                voice_client = guild.voice_client
+                if voice_client:
+                    if voice_client.is_connected():
+                        if voice_client.channel and voice_client.channel.id == channel.id:
+                            return True
+                        await voice_client.move_to(channel)
+                        return True
+                    # 연결 객체가 남아있지만 비정상 상태면 강제 해제
+                    try:
+                        await voice_client.disconnect(force=True)
+                    except Exception:
+                        pass
+                    # 끊긴 세션이 남아있는 경우를 대비해 음성 상태를 초기화
+                    try:
+                        await guild.change_voice_state(channel=None)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.5)
+
+                await channel.connect(reconnect=True, timeout=20.0)
+                return True
+            except Exception as e:
+                last_error = e
+                # 종료 진행 중이면 추가 재시도하지 않음
+                if isinstance(e, RuntimeError) and "Session is closed" in str(e):
+                    logger.warning("세션이 닫혀 음성 연결 재시도를 중단합니다.")
+                    return False
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(delays[min(attempt, len(delays) - 1)])
+
+        logger.error(f"음성 채널 연결 재시도 실패: {last_error}")
+        return False
 
     async def ensure_voice_client(self, ctx):
         """음성 채널에 연결되어 있는지 확인하고, 없으면 연결합니다."""
-        if not ctx.voice_client:
-            if ctx.author.voice:
-                await ctx.author.voice.channel.connect()
+        if self.bot.is_closed():
+            return False
+
+        if not getattr(ctx.author, "voice", None) or not ctx.author.voice.channel:
+            await self._safe_ctx_send(ctx, "선생님, 음성 채널에 먼저 입장해주세요! 아리스가 어디로 가야 할지 모르겠어요~", delete_after=10)
+            await self.delete_command_message(ctx)
+            return False
+
+        async with self._get_voice_connect_lock(ctx.guild.id):
+            if ctx.voice_client and ctx.voice_client.is_connected():
+                # 다른 채널에 있으면 호출자 채널로 이동
+                if ctx.voice_client.channel and ctx.voice_client.channel.id != ctx.author.voice.channel.id:
+                    try:
+                        await ctx.voice_client.move_to(ctx.author.voice.channel)
+                    except Exception as e:
+                        logger.error(f"음성 채널 이동 실패: {e}")
+                        return False
                 return True
-            else:
-                await ctx.send("선생님, 음성 채널에 먼저 입장해주세요! 아리스가 어디로 가야 할지 모르겠어요~", delete_after=10)
-                await self.delete_command_message(ctx)
-                return False
-        return True
+
+            connected = await self._connect_with_retry(ctx.author.voice.channel, ctx.guild)
+            if connected:
+                return True
+
+            await self._safe_ctx_send(ctx, "선생님, 음성 채널 연결에 실패했어요. 잠시 후 다시 시도해주세요!", delete_after=10)
+            await self.delete_command_message(ctx)
+            return False
 
     async def _cleanup_after_play(self, file_path: Path, ctx, music_player=None, volume_lowered=False, music_was_playing=False, music_was_paused=False):
         """재생 후 파일 정리 및 대기열 처리"""
@@ -414,6 +499,9 @@ class TTS(commands.Cog):
     @commands.Cog.listener()
     async def on_message(self, message):
         """메시지를 받으면 TTS 자동 읽기 모드가 활성화된 사용자의 메시지를 읽습니다."""
+        if self.bot.is_closed():
+            return
+
         # 봇 메시지 무시
         if message.author.bot:
             return
@@ -443,7 +531,11 @@ class TTS(commands.Cog):
         if not message.guild.voice_client:
             if message.author.voice:
                 try:
-                    await message.author.voice.channel.connect()
+                    async with self._get_voice_connect_lock(message.guild.id):
+                        connected = await self._connect_with_retry(message.author.voice.channel, message.guild)
+                    if not connected:
+                        logger.error("음성 채널 연결 재시도 실패")
+                        return
                     # 연결 후 재확인
                     if not message.guild.voice_client:
                         logger.error("음성 채널 연결 후에도 voice_client가 없습니다.")
@@ -534,6 +626,8 @@ class TTS(commands.Cog):
         current_lang = settings.get('lang', 'ko')
         current_model = settings.get('voice_model', '기본')
         use_rvc = settings.get('use_rvc', False)
+        use_supertonic = settings.get('use_supertonic', False)
+        supertonic_voice = settings.get('supertonic_voice', 'default')
         rvc_model = settings.get('rvc_model', None)
         
         view = discord.ui.View()
@@ -558,7 +652,7 @@ class TTS(commands.Cog):
                 discord.SelectOption(
                     label="Supertonic (⚡ 초고속 TTS)",
                     value="supertonic",
-                    description="가장 빠른 온디바이스 TTS (영어만 지원)",
+                    description="온디바이스 TTS, 한국어 포함 31개 언어 지원",
                     default=use_supertonic
                 )
             )
@@ -662,23 +756,22 @@ class TTS(commands.Cog):
                     delete_after=30
                 )
             elif new_use_supertonic:
-                # Supertonic 음성 프리셋 선택 UI 표시
-                # Supertonic은 기본적으로 영어만 지원하며, 음성 프리셋을 선택할 수 있습니다.
-                # 실제 프리셋 목록은 모델에 따라 다를 수 있습니다.
-                supertonic_voices = ['default', 'male', 'female']  # 예시 프리셋 목록
+                # Supertonic 음성 프리셋 선택 UI (M1~M5=남성, F1~F5=여성, 한국어 포함 31개 언어 지원)
+                supertonic_voices = get_available_voice_presets()
+                current_supertonic_voice = updated_settings.get('supertonic_voice', DEFAULT_VOICE_PRESET)
                 
                 voice_options = [
                     discord.SelectOption(
                         label=f"🎤 {voice}",
                         value=voice,
-                        description=f"Supertonic - {voice} voice",
-                        default=(voice == updated_settings.get('supertonic_voice', 'default'))
+                        description=("남성 음성" if voice.startswith('M') else "여성 음성") + f" - Supertonic {voice}",
+                        default=(voice == current_supertonic_voice)
                     )
                     for voice in supertonic_voices
                 ]
                 
                 voice_select = discord.ui.Select(
-                    placeholder=f"Supertonic 음성 선택 (현재: {updated_settings.get('supertonic_voice', 'default')})",
+                    placeholder=f"Supertonic 음성 선택 (현재: {current_supertonic_voice})",
                     options=voice_options
                 )
                 
@@ -704,7 +797,8 @@ class TTS(commands.Cog):
                 updated_view.add_item(voice_select)
                 
                 await interaction.response.send_message(
-                    "선생님, Supertonic으로 변경했어요! 아래에서 음성 프리셋을 선택해주세요! (참고: Supertonic은 영어만 지원합니다)",
+                    "선생님, Supertonic으로 변경했어요! 아래에서 음성 프리셋을 선택해주세요! "
+                    "(M1~M5 남성, F1~F5 여성, 한국어 포함 31개 언어 지원)",
                     view=updated_view,
                     ephemeral=True,
                     delete_after=30
@@ -771,14 +865,14 @@ class TTS(commands.Cog):
         
         # Supertonic을 사용하는 경우
         if use_supertonic and supertonic_available:
-            # Supertonic 음성 프리셋 선택
-            supertonic_voices = ['default', 'male', 'female']  # 예시 프리셋 목록
+            # Supertonic 음성 프리셋 선택 (M1~M5 남성, F1~F5 여성)
+            supertonic_voices = get_available_voice_presets()
             
             voice_options = [
                 discord.SelectOption(
                     label=f"⚡ {voice}",
                     value=voice,
-                    description=f"Supertonic - {voice} voice",
+                    description=("남성 음성" if voice.startswith('M') else "여성 음성") + f" - Supertonic {voice}",
                     default=(voice == supertonic_voice)
                 )
                 for voice in supertonic_voices
@@ -974,6 +1068,8 @@ class TTS(commands.Cog):
         enabled = settings.get('enabled', False)
         slow = settings.get('slow', False)
         use_rvc = settings.get('use_rvc', False)
+        use_supertonic = settings.get('use_supertonic', False)
+        supertonic_voice = settings.get('supertonic_voice', 'default')
         rvc_model = settings.get('rvc_model', None)
         
         # 모델 이름 가져오기

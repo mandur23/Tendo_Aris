@@ -86,8 +86,26 @@ RVC_MODELS_FILE = DATA_DIR / 'rvc_models.json'
 MODELS_DIR = Path('models')
 
 
+def _remap_legacy_path(old_path: str, base_dir: Path) -> str:
+    """다른 PC 의 절대경로를 사용자명에 무관하게 현재 `base_dir` 기준 경로로 재매핑한다.
+
+    경로에 `Tendo_Aris` 가 포함되어 있을 때만 그 이후 부분을 상대경로로 잘라 사용한다.
+    """
+    if not old_path or 'Tendo_Aris' not in old_path:
+        return old_path
+    parts = old_path.split('Tendo_Aris', 1)
+    if len(parts) <= 1:
+        return old_path
+    relative_path = parts[1].lstrip('\\/')
+    return str(base_dir / relative_path)
+
+
 def load_rvc_models():
-    """RVC 모델 목록을 파일에서 로드합니다."""
+    """RVC 모델 목록을 JSON 에서 로드한다.
+
+    부수적으로 다른 PC 의 절대경로를 현재 프로젝트 기준으로 재매핑하고,
+    재매핑 후에도 파일이 없는 항목은 자동으로 제거한 뒤 JSON 을 다시 저장한다.
+    """
     try:
         if not RVC_MODELS_FILE.exists():
             return {}
@@ -97,55 +115,47 @@ def load_rvc_models():
                 return {}
             import json
             models = json.loads(content)
-            
-            # 경로 수정: 하드코딩된 경로를 현재 사용자 경로로 변경
+
             from utils.config import BASE_DIR
             updated = False
-            
+            to_remove = []
+
             for model_name, model_info in models.items():
-                # model_path 수정
-                if 'model_path' in model_info:
-                    old_path = model_info['model_path']
-                    # C:\Users\User\... 경로를 현재 BASE_DIR로 변경
-                    if r'C:\Users\User' in old_path:
-                        # Tendo_Aris 이후의 상대 경로 추출
-                        if 'Tendo_Aris' in old_path:
-                            # Tendo_Aris 이후의 경로 추출
-                            parts = old_path.split('Tendo_Aris', 1)
-                            if len(parts) > 1:
-                                relative_path = parts[1].lstrip('\\/')
-                                new_path = str(BASE_DIR / relative_path)
-                                # 파일이 존재하는지 확인
-                                if Path(new_path).exists():
-                                    model_info['model_path'] = new_path
-                                    updated = True
-                                    logger.info(f"경로 수정: {model_name} -> {new_path}")
-                                else:
-                                    logger.warning(f"경로 수정 실패 (파일 없음): {model_name} -> {new_path}")
-                
-                # index_path 수정
-                if 'index_path' in model_info and model_info.get('index_path'):
-                    old_path = model_info['index_path']
-                    if r'C:\Users\User' in old_path:
-                        if 'Tendo_Aris' in old_path:
-                            parts = old_path.split('Tendo_Aris', 1)
-                            if len(parts) > 1:
-                                relative_path = parts[1].lstrip('\\/')
-                                new_path = str(BASE_DIR / relative_path)
-                                if Path(new_path).exists():
-                                    model_info['index_path'] = new_path
-                                    updated = True
-                                else:
-                                    # 파일이 없으면 None으로 설정
-                                    model_info['index_path'] = None
-                                    updated = True
-                                    logger.warning(f"인덱스 파일 없음: {model_name} -> {new_path}")
-            
-            # 경로가 수정되었으면 파일에 저장
+                old_model_path = model_info.get('model_path')
+                if old_model_path and 'Tendo_Aris' in old_model_path and not Path(old_model_path).exists():
+                    new_path = _remap_legacy_path(old_model_path, BASE_DIR)
+                    if Path(new_path).exists():
+                        model_info['model_path'] = new_path
+                        updated = True
+                        logger.info(f"RVC 경로 자동 보정: {model_name} → {new_path}")
+                    else:
+                        to_remove.append(model_name)
+                        logger.warning(
+                            f"RVC 모델 파일을 찾을 수 없어 등록 정보를 제거합니다: "
+                            f"{model_name} (기존: {old_model_path})"
+                        )
+                        continue
+
+                old_index_path = model_info.get('index_path')
+                if old_index_path and 'Tendo_Aris' in old_index_path and not Path(old_index_path).exists():
+                    new_path = _remap_legacy_path(old_index_path, BASE_DIR)
+                    if Path(new_path).exists():
+                        model_info['index_path'] = new_path
+                        updated = True
+                    else:
+                        # 인덱스는 선택 사항이므로 항목 자체는 유지하고 None 으로만 표시.
+                        model_info['index_path'] = None
+                        updated = True
+                        logger.warning(f"RVC index 파일 없음 (None 처리): {model_name}")
+
+            for name in to_remove:
+                del models[name]
+                updated = True
+
             if updated:
                 save_rvc_models(models)
-                logger.info("RVC 모델 경로가 자동으로 수정되었습니다.")
-            
+                logger.info("RVC 모델 등록 정보가 자동으로 정리되었습니다.")
+
             return models
     except (FileNotFoundError, Exception) as e:
         logger.warning(f"RVC 모델 파일 로드 실패: {e}")

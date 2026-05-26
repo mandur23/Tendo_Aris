@@ -7,6 +7,7 @@ from core.bot import FuzzyBot
 from core.shutdown_handler import get_shutdown_event
 from cogs.music import Music
 from cogs.tts import TTS
+from cogs.chat_ai import ChatAI
 from GameSystem.YachtDiceGame import YachtDiceGame
 from utils.config import DISCORD_BOT_TOKEN, COMMAND_PREFIX
 from utils.db_utils import close_db_pool
@@ -25,6 +26,7 @@ async def load_cogs(bot: FuzzyBot):
     """모든 Cog를 봇에 로드합니다."""
     await bot.add_cog(Music(bot))
     await bot.add_cog(TTS(bot))
+    await bot.add_cog(ChatAI(bot))
     await bot.add_cog(YachtDiceGame(bot))
 
 
@@ -85,8 +87,14 @@ async def run_bot(bot: FuzzyBot):
                     except asyncio.CancelledError:
                         pass
             else:
-                # 봇이 자체적으로 종료된 경우
-                shutdown_task.cancel()
+                # 봇이 자체적으로 종료된 경우: bot_task 결과를 회수해 예외 누락 방지
+                if not shutdown_task.done():
+                    shutdown_task.cancel()
+                    try:
+                        await shutdown_task
+                    except asyncio.CancelledError:
+                        pass
+                await bot_task
                 
     except KeyboardInterrupt:
         logger.info("키보드 인터럽트로 봇을 종료합니다.")

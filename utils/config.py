@@ -43,6 +43,34 @@ if FFMPEG_PATH:
 DISCORD_BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN', '').strip()
 COMMAND_PREFIX = '!'
 
+# 대화형 AI (로컬 LLM/Ollama) 설정
+LOCAL_AI_BASE_URL = os.getenv('LOCAL_AI_BASE_URL', 'http://127.0.0.1:11434').strip() or 'http://127.0.0.1:11434'
+LOCAL_AI_MODEL = os.getenv('LOCAL_AI_MODEL', 'llama3.1:8b').strip() or 'llama3.1:8b'
+
+try:
+    LOCAL_AI_MAX_PROMPT_CHARS = int(os.getenv('LOCAL_AI_MAX_PROMPT_CHARS', '2000'))
+except (TypeError, ValueError):
+    LOCAL_AI_MAX_PROMPT_CHARS = 2000
+    if os.getenv('LOCAL_AI_MAX_PROMPT_CHARS') is not None:
+        logger.warning("LOCAL_AI_MAX_PROMPT_CHARS가 숫자가 아니에요. 2000을 사용할게요.")
+
+try:
+    LOCAL_AI_TEMPERATURE = float(os.getenv('LOCAL_AI_TEMPERATURE', '0.7'))
+except (TypeError, ValueError):
+    LOCAL_AI_TEMPERATURE = 0.7
+    if os.getenv('LOCAL_AI_TEMPERATURE') is not None:
+        logger.warning("LOCAL_AI_TEMPERATURE가 숫자가 아니에요. 0.7을 사용할게요.")
+
+try:
+    LOCAL_AI_TIMEOUT_SECONDS = int(os.getenv('LOCAL_AI_TIMEOUT_SECONDS', '120'))
+except (TypeError, ValueError):
+    LOCAL_AI_TIMEOUT_SECONDS = 120
+    if os.getenv('LOCAL_AI_TIMEOUT_SECONDS') is not None:
+        logger.warning("LOCAL_AI_TIMEOUT_SECONDS가 숫자가 아니에요. 120초를 사용할게요.")
+
+# 온도 범위 보정
+LOCAL_AI_TEMPERATURE = max(0.0, min(2.0, LOCAL_AI_TEMPERATURE))
+
 # 음악 플레이어 설정
 DEFAULT_VOLUME = 0.2
 IDLE_TIMEOUT = 300  # 초

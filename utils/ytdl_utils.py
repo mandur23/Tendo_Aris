@@ -4,12 +4,13 @@ import random
 from utils.config import FFMPEG_PATH
 
 ytdl_format_options = {
-    'format': 'bestaudio/best',
+    # m4a → webm → 그 외 audio-only → 최후수단으로 비디오 포함 best 까지 fallback.
+    # tv_simply 등 일부 player_client 는 audio-only itag 를 제공하지 않으므로 폭넓게 허용.
+    'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best',
     'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
     'restrictfilenames': True,
     'noplaylist': True,
     'nocheckcertificate': True,
-    'ignoreerrors': False,
     'logtostderr': False,
     'quiet': True,
     'no_warnings': True,
@@ -35,6 +36,16 @@ ytdl_format_options = {
         'Accept-Language': 'en-us,en;q=0.5',
         'Sec-Fetch-Mode': 'navigate',
     },
+    # YouTube 안티봇 우회는 yt_dlp 의 기본 player_client 우선순위에 맡긴다.
+    # 2026 년 기준 yt_dlp 기본값(android_vr 등)이 PoToken 없이도 audio-only itag(139/140 등)를
+    # 안정적으로 반환한다. 사용자가 직접 player_client 를 지정하면 오히려 PoToken 이 강제되는
+    # 클라이언트로 한정되어 storyboard 만 남는 회귀가 발생하므로 명시하지 않는다.
+    # 필요 시 player_skip 정도만 미세조정한다.
+    'extractor_args': {
+        'youtube': {
+            'player_skip': ['configs'],
+        },
+    },
     'age_limit': None,
     'extract_flat': False,
     'geo_bypass': True,
@@ -42,7 +53,10 @@ ytdl_format_options = {
     'writesubtitles': False,
     'writeautomaticsub': False,
     'allsubtitles': False,
-    'ignoreerrors': True,
+    # ignoreerrors=True 는 추출 실패 시 None 을 반환시켜 downstream 에서
+    # 'NoneType' object has no attribute 'get' 같은 미스리딩한 에러를 만든다.
+    # 봇 로직은 예외 기반 재시도이므로 False 로 두어 yt_dlp 가 명확히 예외를 던지게 한다.
+    'ignoreerrors': False,
 }
 
 ffmpeg_options = {

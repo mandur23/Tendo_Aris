@@ -34,6 +34,11 @@
 - **느린 속도 모드**: 더 천천히 읽기 (gTTS만 지원)
 - **대기열 시스템**: 여러 메시지를 순서대로 읽기
 
+### 🤖 대화형 AI 기능
+- **AI 질의응답**: 로컬 LLM(Ollama) 기반 자연어 대화
+- **음성 연계**: AI 답변을 TTS로 바로 읽기 가능
+- **명령어/슬래시 지원**: Prefix 명령어와 `/ai` 그룹 모두 제공
+
 ### 🎲 야추 다이스 게임
 - **멀티플레이어 지원**: 여러 명이 동시에 플레이 가능
 - **실시간 게임**: 버튼을 통한 직관적인 조작
@@ -89,6 +94,11 @@ pip install -r requirements.txt
 ```env
 DISCORD_BOT_TOKEN=your_bot_token_here
 FFMPEG_PATH=C:\path\to\your\ffmpeg.exe
+LOCAL_AI_BASE_URL=http://127.0.0.1:11434
+LOCAL_AI_MODEL=llama3.1:8b
+LOCAL_AI_MAX_PROMPT_CHARS=2000
+LOCAL_AI_TEMPERATURE=0.7
+LOCAL_AI_TIMEOUT_SECONDS=120
 ```
 
 #### 3.2 FFmpeg 설치 및 경로 설정
@@ -221,6 +231,23 @@ python bot.py
 | `!ttsrvc사용` | - | RVC TTS 사용 설정 |
 | `!ttsrvc끄기` | - | RVC TTS 비활성화 (gTTS로 전환) |
 
+### 🤖 대화형 AI 명령어
+
+#### 전통 명령어
+
+| 명령어 | 별칭 | 설명 |
+|--------|------|------|
+| `!대화 <질문>` | `!ai`, `!챗`, `!질문` | AI에게 질문하고 텍스트 답변 받기 |
+| `!대화tts <질문>` | `!aitts`, `!챗tts` | AI 답변 생성 후 TTS로 음성 재생 |
+| `!ai설정` | `!aisettings` | AI 연동 상태/모델 설정 확인 |
+
+#### 슬래시 명령어
+
+| 명령어 | 설명 |
+|--------|------|
+| `/ai 대화 <prompt>` | AI에게 질문합니다 |
+| `/ai 대화tts <prompt>` | AI 답변을 텍스트+음성으로 제공합니다 |
+
 #### 슬래시 명령어
 
 | 명령어 | 설명 |
@@ -300,7 +327,8 @@ Tendo_Aris/
 ├── cogs/                       # Discord 명령어 확장
 │   ├── __init__.py
 │   ├── music.py                # 음악 재생 명령어 (전통 + 슬래시)
-│   └── tts.py                  # TTS 명령어 (전통 + 슬래시)
+│   ├── tts.py                  # TTS 명령어 (전통 + 슬래시)
+│   └── chat_ai.py              # 대화형 AI 명령어 (전통 + 슬래시)
 │
 ├── GameSystem/                 # 게임 시스템
 │   └── YachtDiceGame.py        # 야추 다이스 게임
@@ -379,6 +407,13 @@ AUTO_RESTART_ON_OFFLINE=true
 ```python
 # 봇 설정
 COMMAND_PREFIX = '!'
+
+# 로컬 AI 설정 (Ollama)
+LOCAL_AI_BASE_URL = 'http://127.0.0.1:11434'
+LOCAL_AI_MODEL = 'llama3.1:8b'
+LOCAL_AI_MAX_PROMPT_CHARS = 2000
+LOCAL_AI_TEMPERATURE = 0.7
+LOCAL_AI_TIMEOUT_SECONDS = 120
 
 # 음악 플레이어 설정
 DEFAULT_VOLUME = 0.2              # 기본 볼륨 (0.0 ~ 1.0)
@@ -467,6 +502,12 @@ USE_MYSQL = False                 # MySQL 사용 여부 (True면 MySQL, False면
 - 데이터베이스가 생성되어 있는지 확인 (`init_database.py` 실행)
 - 사용자 권한 확인 (데이터베이스 접근 권한 필요)
 - MySQL 연결 실패 시 자동으로 JSON 파일 모드로 전환됩니다
+
+#### 8. 로컬 AI가 응답하지 않음
+- Ollama가 실행 중인지 확인 (`ollama serve`)
+- 모델이 설치되어 있는지 확인 (`ollama list`)
+- 모델이 없으면 다운로드 (`ollama pull llama3.1:8b`)
+- `TOKEN.env`의 `LOCAL_AI_BASE_URL`, `LOCAL_AI_MODEL` 설정 확인
 
 ### 로그 확인
 

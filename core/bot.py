@@ -67,18 +67,26 @@ class FuzzyBot(commands.Bot):
 
     async def on_command_error(self, ctx, error):
         """전역 명령어 에러 핸들러"""
+        async def _safe_error_send(message: str):
+            try:
+                if self.is_closed():
+                    return
+                await ctx.send(message, delete_after=12)
+            except Exception:
+                pass
+
         if isinstance(error, commands.CommandNotFound):
             # 이미 get_context에서 처리됨
             return
         elif isinstance(error, commands.MissingRequiredArgument):
-            await ctx.send(f"선생님, 명령어에 필요한 인자가 빠졌어요: `{error.param.name}`", delete_after=12)
+            await _safe_error_send(f"선생님, 명령어에 필요한 인자가 빠졌어요: `{error.param.name}`")
         elif isinstance(error, commands.BadArgument):
-            await ctx.send(f"선생님, 입력하신 인자가 올바르지 않아요: {str(error)[:100]}", delete_after=12)
+            await _safe_error_send(f"선생님, 입력하신 인자가 올바르지 않아요: {str(error)[:100]}")
         elif isinstance(error, commands.MissingPermissions):
-            await ctx.send("앗, 죄송해요 선생님. 이 명령어는 특별한 권한이 필요해요.", delete_after=12)
+            await _safe_error_send("앗, 죄송해요 선생님. 이 명령어는 특별한 권한이 필요해요.")
         elif isinstance(error, commands.CommandOnCooldown):
-            await ctx.send(f"선생님, 조금만 기다려주세요! {error.retry_after:.1f}초 후에 다시 시도해주세요.", delete_after=12)
+            await _safe_error_send(f"선생님, 조금만 기다려주세요! {error.retry_after:.1f}초 후에 다시 시도해주세요.")
         else:
             logger.error(f"명령어 에러 ({ctx.command}): {error}", exc_info=error)
-            await ctx.send(f"선생님, 명령어 실행 중 오류가 발생했어요: {str(error)[:100]}", delete_after=12)
+            await _safe_error_send(f"선생님, 명령어 실행 중 오류가 발생했어요: {str(error)[:100]}")
 

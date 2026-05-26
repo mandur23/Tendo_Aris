@@ -221,6 +221,11 @@ async def retry_on_403_error(func, *args, max_retries: int = 3, base_delay: floa
                 # run_in_executor처럼 Future 객체를 반환하는 경우 await
                 if isinstance(result, asyncio.Future):
                     result = await result
+            # yt_dlp 가 ignoreerrors=True 등으로 None 을 반환하면 호출자가
+            # source.get(...) 등에서 모호한 'NoneType' AttributeError 를 맞게 됨.
+            # 여기서 명시적 예외로 승격시켜 의도된 에러 흐름으로 처리되게 한다.
+            if result is None:
+                raise ValueError("추출 결과가 비어있음 (yt_dlp returned None)")
             return result
         except Exception as e:
             last_exception = e
@@ -237,6 +242,10 @@ async def retry_on_403_error(func, *args, max_retries: int = 3, base_delay: floa
                     raise
             elif 'private' in error_msg or 'unavailable' in error_msg:
                 logger.warning(f"비공개 또는 삭제된 콘텐츠: {e}")
+                raise
+            elif 'drm' in error_msg or 'drm protected' in error_msg:
+                # DRM 보호 영상은 재시도해도 의미가 없으므로 즉시 raise.
+                logger.warning(f"DRM 보호 콘텐츠 - 재생 불가: {e}")
                 raise
             else:
                 # 403이 아닌 다른 오류는 즉시 재발생
@@ -270,6 +279,8 @@ def handle_extract_error(error: Exception, max_retries: int = 3, attempt: int = 
             return "🔍 제목을 가져올 수 없는 영상"
     elif 'private' in error_msg or 'unavailable' in error_msg:
         return "❌ 비공개 또는 삭제된 영상"
+    elif 'drm' in error_msg:
+        return "🔒 DRM 보호된 영상 (재생 불가)"
     else:
         if attempt >= max_retries - 1:
             logger.error(f"정보 추출 완전 실패: {error}")

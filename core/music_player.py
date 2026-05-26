@@ -326,7 +326,9 @@ class MusicPlayer:
                     )
                 except Exception as e:
                     error_msg = str(e).lower()
-                    if 'private' in error_msg or 'unavailable' in error_msg:
+                    if 'drm' in error_msg:
+                        await safe_send(self.channel, '앗, 이 영상은 DRM으로 보호되어 있어서 아리스가 재생할 수 없어요. 다른 곡으로 부탁드려요!', delete_after=10)
+                    elif 'private' in error_msg or 'unavailable' in error_msg:
                         await safe_send(self.channel, f'앗, 이 영상은 비공개이거나 삭제되었어요: {str(e)[:100]}...', delete_after=10)
                     else:
                         await safe_send(self.channel, f'어머나, {MAX_RETRIES}번 시도했지만 노래를 불러올 수 없어요: {str(e)[:100]}...', delete_after=10)

@@ -1,271 +1,207 @@
-"""Supertonic TTS 유틸리티"""
-import os
+"""Supertonic TTS 유틸리티 (공식 PyPI 패키지 `supertonic` 사용)
+
+Supertonic v3 는 한국어(`ko`)를 포함한 31개 언어 + `na`(언어 미지정) 폴백을 지원하며,
+ONNX Runtime 기반의 on-device 합성을 수행한다. 첫 실행 시 약 305MB 의 모델을 자동으로
+Hugging Face Hub 에서 받는다.
+
+Discord 봇의 TTS 흐름에 맞춰 다음을 제공한다.
+- `check_supertonic_available()`            : 라이브러리(설치된 supertonic) 가용 여부
+- `check_supertonic_model_exists()`         : 모델 자산이 디스크에 있는지 여부
+- `download_supertonic_model()`             : 모델 자산을 미리 받기
+- `text_to_speech_supertonic(text, ...)`    : 합성 후 WAV 파일 경로 반환
+- `get_available_voice_presets()`           : 사용 가능한 음성 프리셋 목록
+- `get_available_languages()`               : 사용 가능한 언어 코드 목록
+- `DEFAULT_VOICE_PRESET`                    : 기본 음성 프리셋 (`M1`)
+"""
 import logging
-import numpy as np
-from pathlib import Path
 import tempfile
-import wave
+import threading
+from pathlib import Path
+from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
-# Supertonic 모델 경로 (Hugging Face assets 디렉토리 구조 사용)
-SUPERTONIC_MODEL_DIR = Path('models/supertonic')
-SUPERTONIC_MODEL_DIR.mkdir(parents=True, exist_ok=True)
-
-# TTS 임시 파일 저장 경로
+# TTS 임시 파일 저장 경로 (cogs/tts.py 와 호환)
 TTS_TEMP_DIR = Path('logs/tts_temp')
 TTS_TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
-# Supertonic 모델 파일 경로 (Hugging Face 구조 기준)
-SUPERTONIC_MODEL_PATH = SUPERTONIC_MODEL_DIR / 'model.onnx'
-SUPERTONIC_CONFIG_PATH = SUPERTONIC_MODEL_DIR / 'config.json'
-SUPERTONIC_VOICES_DIR = SUPERTONIC_MODEL_DIR / 'voices'
+# 합성 모델 식별자 (라이브러리 기본값 supertonic-3 사용)
+_MODEL_NAME = 'supertonic-3'
 
-# Supertonic 사용 가능 여부
-_supertonic_available = None
-_onnx_session = None
-_tokenizer = None
+# 음성 프리셋: Supertonic 가 공식 제공하는 10개 voice
+# (M=male, F=female / 숫자가 클수록 새로 추가된 보이스)
+_VOICE_PRESETS: List[str] = ['M1', 'M2', 'M3', 'M4', 'M5', 'F1', 'F2', 'F3', 'F4', 'F5']
+DEFAULT_VOICE_PRESET = 'M1'
+
+# 라이브러리/모델 가용성 캐시
+_library_available: Optional[bool] = None
+
+# TTS 인스턴스 캐시 (모델 로드는 비용이 크므로 1회만 로드 후 재사용)
+# - 스레드 안전성을 위해 lock 사용
+_tts_instance = None
+_tts_instance_lock = threading.Lock()
 
 
-def _check_supertonic_available() -> bool:
-    """Supertonic이 사용 가능한지 확인합니다."""
-    global _supertonic_available
-    
-    if _supertonic_available is not None:
-        return _supertonic_available
-    
+def _check_library_available() -> bool:
+    """공식 supertonic 라이브러리가 import 가능한지 확인한다."""
+    global _library_available
+    if _library_available is not None:
+        return _library_available
     try:
-        import onnxruntime
-        _supertonic_available = True
-        logger.info("Supertonic TTS 사용 가능 (onnxruntime 설치됨)")
+        import supertonic  # noqa: F401
+        _library_available = True
+        logger.info("Supertonic 라이브러리 사용 가능 (`pip install supertonic`)")
+    except ImportError as e:
+        _library_available = False
+        logger.warning(f"Supertonic 라이브러리 미설치: {e}. `pip install supertonic` 로 설치하세요.")
+    return _library_available
+
+
+def check_supertonic_available() -> bool:
+    """외부에서 호출하는 호환용 alias."""
+    return _check_library_available()
+
+
+def _get_tts_instance(auto_download: bool = True):
+    """TTS 인스턴스를 lazy 하게 로드해 캐시한다."""
+    global _tts_instance
+    if _tts_instance is not None:
+        return _tts_instance
+
+    with _tts_instance_lock:
+        if _tts_instance is not None:
+            return _tts_instance
+        if not _check_library_available():
+            return None
+        try:
+            from supertonic import TTS
+            logger.info(f"Supertonic 모델 로드 중... (model={_MODEL_NAME}, auto_download={auto_download})")
+            _tts_instance = TTS(model=_MODEL_NAME, auto_download=auto_download)
+            logger.info("Supertonic 모델 로드 완료")
+        except Exception as e:
+            logger.error(f"Supertonic 모델 로드 실패: {e}", exc_info=True)
+            _tts_instance = None
+    return _tts_instance
+
+
+def check_supertonic_model_exists() -> bool:
+    """모델 자산이 로컬에 캐싱되어 있는지 가볍게 확인한다.
+
+    공식 라이브러리는 모델을 Hugging Face Hub 캐시에 받는다. 정확한 경로를 모르더라도
+    `auto_download=False` 로 TTS 인스턴스 생성을 시도해서 성공하면 자산이 존재하는 것으로
+    간주한다. 한 번 인스턴스화에 성공하면 캐시되어 다음 호출은 즉시 True 를 반환한다.
+    """
+    global _tts_instance
+    if _tts_instance is not None:
         return True
-    except ImportError:
-        _supertonic_available = False
-        logger.warning("Supertonic TTS 사용 불가 (onnxruntime 미설치)")
+    if not _check_library_available():
         return False
-
-
-def _load_supertonic_model():
-    """Supertonic ONNX 모델을 로드합니다."""
-    global _onnx_session
-    
-    if _onnx_session is not None:
-        return _onnx_session
-    
-    if not _check_supertonic_available():
-        return None
-    
-    # 모델 파일 찾기 (여러 가능한 위치 확인)
-    model_paths = [
-        SUPERTONIC_MODEL_PATH,
-        SUPERTONIC_MODEL_DIR / 'assets' / 'model.onnx',
-        Path('assets') / 'model.onnx',
-    ]
-    
-    model_path = None
-    for path in model_paths:
-        if path.exists():
-            model_path = path
-            break
-    
-    if model_path is None:
-        logger.error(f"Supertonic 모델 파일을 찾을 수 없습니다. 다음 위치를 확인했습니다: {model_paths}")
-        return None
-    
     try:
-        import onnxruntime as ort
-        
-        # ONNX Runtime 세션 생성
-        providers = ['CPUExecutionProvider']
-        # GPU가 있으면 CUDA 사용 (선택사항)
-        # if 'CUDAExecutionProvider' in ort.get_available_providers():
-        #     providers.insert(0, 'CUDAExecutionProvider')
-        
-        sess_options = ort.SessionOptions()
-        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        
-        _onnx_session = ort.InferenceSession(
-            str(model_path),
-            sess_options=sess_options,
-            providers=providers
-        )
-        
-        logger.info(f"Supertonic 모델 로드 완료: {model_path}")
-        return _onnx_session
-    except Exception as e:
-        logger.error(f"Supertonic 모델 로드 실패: {e}", exc_info=True)
-        return None
-
-
-def _download_supertonic_model():
-    """Hugging Face에서 Supertonic 모델을 다운로드합니다."""
-    try:
-        from huggingface_hub import snapshot_download
-        
-        logger.info("Supertonic 모델 다운로드 시작...")
-        
-        # 전체 저장소 다운로드
-        model_path = snapshot_download(
-            repo_id="Supertone/supertonic",
-            local_dir=str(SUPERTONIC_MODEL_DIR),
-            local_dir_use_symlinks=False
-        )
-        
-        logger.info(f"Supertonic 모델 다운로드 완료: {model_path}")
+        from supertonic import TTS
+        # auto_download=False 로 시도. 자산이 없으면 예외 발생.
+        with _tts_instance_lock:
+            if _tts_instance is None:
+                _tts_instance = TTS(model=_MODEL_NAME, auto_download=False)
         return True
-    except ImportError:
-        logger.error("huggingface_hub가 설치되지 않았습니다. pip install huggingface_hub로 설치해주세요.")
-        return False
     except Exception as e:
-        logger.error(f"Supertonic 모델 다운로드 실패: {e}", exc_info=True)
+        logger.debug(f"Supertonic 모델 자산 미확인 (auto_download=False 실패): {e}")
         return False
+
+
+def download_supertonic_model() -> bool:
+    """모델 자산을 미리 다운로드한다 (auto_download=True 로 인스턴스 생성)."""
+    return _get_tts_instance(auto_download=True) is not None
+
+
+def get_available_voice_presets() -> List[str]:
+    """사용 가능한 음성 프리셋 목록 (`M1` ~ `F5`) 을 반환한다."""
+    return list(_VOICE_PRESETS)
+
+
+def get_available_languages() -> List[str]:
+    """라이브러리가 지원하는 언어 코드 목록을 반환한다."""
+    if not _check_library_available():
+        return []
+    try:
+        from supertonic import AVAILABLE_LANGUAGES
+        return list(AVAILABLE_LANGUAGES)
+    except Exception:
+        return []
 
 
 def text_to_speech_supertonic(
     text: str,
-    voice_preset: str = "default",
-    inference_steps: int = 2
+    voice_preset: str = DEFAULT_VOICE_PRESET,
+    lang: str = 'en',
+    total_steps: int = 5,
+    speed: float = 1.05,
 ) -> Path:
-    """
-    Supertonic을 사용하여 텍스트를 음성 파일로 변환합니다.
-    
+    """Supertonic 으로 텍스트를 합성하여 WAV 파일 경로를 반환한다.
+
     Args:
-        text: 변환할 텍스트 (영어만 지원)
-        voice_preset: 음성 프리셋 이름 (기본값: "default")
-        inference_steps: 추론 단계 수 (기본값: 2, 더 높을수록 품질 향상)
-    
+        text: 합성할 텍스트.
+        voice_preset: 음성 프리셋 이름 (M1~M5, F1~F5). 잘못된 값이면 기본 프리셋으로 대체.
+        lang: 언어 코드 (`en`, `ko`, `ja`, ...). 지원 외 언어는 `na` 폴백.
+        total_steps: denoising step 수 (높을수록 품질↑, 속도↓). 라이브러리 기본 5.
+        speed: 발화 속도 배율 (라이브러리 권장 0.9 ~ 1.5).
+
     Returns:
-        생성된 음성 파일 경로 (WAV 형식)
+        생성된 WAV 파일 경로.
+
+    Raises:
+        RuntimeError: 라이브러리 미설치/모델 로드 실패/합성 실패.
     """
-    if not _check_supertonic_available():
-        raise RuntimeError("Supertonic TTS를 사용할 수 없습니다. onnxruntime를 설치해주세요.")
-    
-    # 모델이 없으면 다운로드 시도
-    if not _check_model_files_exist():
-        logger.warning("Supertonic 모델이 없습니다. 다운로드를 시도합니다...")
-        if not _download_supertonic_model():
-            raise RuntimeError("Supertonic 모델을 다운로드할 수 없습니다. 수동으로 다운로드해주세요.")
-    
-    # 모델 로드
-    session = _load_supertonic_model()
-    if session is None:
+    if not _check_library_available():
+        raise RuntimeError(
+            "Supertonic 라이브러리가 설치되어 있지 않습니다. `pip install supertonic` 로 설치하세요."
+        )
+
+    tts = _get_tts_instance(auto_download=True)
+    if tts is None:
         raise RuntimeError("Supertonic 모델을 로드할 수 없습니다.")
-    
+
+    # 음성 프리셋 정상화
+    voice_name = voice_preset if voice_preset in _VOICE_PRESETS else DEFAULT_VOICE_PRESET
+    if voice_preset != voice_name:
+        logger.warning(
+            f"알 수 없는 voice_preset='{voice_preset}', 기본값 '{voice_name}' 로 대체합니다."
+        )
+
+    # 언어 코드 정상화 (지원 외는 'na' 로)
+    available = set(get_available_languages())
+    if lang not in available:
+        fallback_lang = 'na' if 'na' in available else 'en'
+        logger.warning(
+            f"지원하지 않는 언어 코드 '{lang}', '{fallback_lang}' 로 대체합니다."
+        )
+        lang = fallback_lang
+
     try:
-        # 임시 파일 생성
+        style = tts.get_voice_style(voice_name=voice_name)
+        wav, _duration = tts.synthesize(
+            text=text,
+            voice_style=style,
+            total_steps=total_steps,
+            speed=speed,
+            lang=lang,
+        )
+
+        # 임시 WAV 파일 생성
         temp_file = tempfile.NamedTemporaryFile(
             delete=False,
             suffix='.wav',
-            dir=TTS_TEMP_DIR
+            dir=TTS_TEMP_DIR,
         )
         temp_path = Path(temp_file.name)
         temp_file.close()
-        
-        # Supertonic은 영어만 지원하므로, 다른 언어는 경고
-        # 실제 구현은 Supertonic의 Python 예제 코드를 참고해야 합니다.
-        # 여기서는 기본 구조만 제공합니다.
-        
-        # 입력 텍스트 전처리 및 토큰화
-        # 실제로는 Supertonic의 토크나이저를 사용해야 합니다.
-        input_ids = _encode_text(text)
-        
-        # ONNX 모델 추론
-        # 실제 입력/출력 이름은 모델에 따라 다를 수 있습니다.
-        input_name = session.get_inputs()[0].name
-        
-        # 배치 차원 추가
-        if len(input_ids.shape) == 1:
-            input_ids = np.expand_dims(input_ids, axis=0)
-        
-        # 추론 실행 (실제 구현은 Supertonic의 예제 코드 참고)
-        # 여기서는 기본 구조만 제공합니다.
-        outputs = session.run(None, {input_name: input_ids})
-        
-        # 출력 처리 (실제 형식은 모델에 따라 다름)
-        audio_data = outputs[0] if len(outputs) > 0 else None
-        
-        if audio_data is None:
-            raise RuntimeError("Supertonic 모델 출력을 가져올 수 없습니다.")
-        
-        # 오디오 데이터를 WAV 파일로 저장
-        _save_wav(audio_path=temp_path, audio_data=audio_data, sample_rate=24000)
-        
-        logger.info(f"Supertonic TTS 파일 생성 완료: {temp_path.name} (텍스트 길이: {len(text)})")
+
+        tts.save_audio(wav, str(temp_path))
+
+        logger.info(
+            f"Supertonic TTS 생성 완료: voice={voice_name}, lang={lang}, "
+            f"len(text)={len(text)}, file={temp_path.name}"
+        )
         return temp_path
-        
     except Exception as e:
-        logger.error(f"Supertonic TTS 생성 중 오류: {e}", exc_info=True)
+        logger.error(f"Supertonic TTS 합성 실패: {e}", exc_info=True)
         raise
-
-
-def _encode_text(text: str) -> np.ndarray:
-    """
-    텍스트를 모델 입력 형식으로 인코딩합니다.
-    
-    실제 구현은 Supertonic의 토크나이저를 사용해야 합니다.
-    여기서는 기본 구조만 제공합니다.
-    """
-    # 실제로는 Supertonic의 토크나이저를 사용해야 합니다.
-    # 예시: tokenizer.encode(text) 또는 유사한 방법
-    
-    # 임시로 간단한 인코딩 (실제로는 모델에 맞는 토크나이저 필요)
-    # ASCII 기반 간단한 인코딩 (실제 구현에서는 적절한 토크나이저 사용)
-    encoded = [ord(c) for c in text[:512]]  # 최대 길이 제한
-    return np.array(encoded, dtype=np.int64)
-
-
-def _save_wav(audio_path: Path, audio_data: np.ndarray, sample_rate: int = 24000):
-    """
-    오디오 데이터를 WAV 파일로 저장합니다.
-    
-    Args:
-        audio_path: 저장할 파일 경로
-        audio_data: 오디오 데이터 (numpy 배열)
-        sample_rate: 샘플 레이트 (기본값: 24000)
-    """
-    # 오디오 데이터 정규화 및 변환
-    if audio_data.dtype != np.int16:
-        # float32를 int16으로 변환
-        if audio_data.dtype == np.float32 or audio_data.dtype == np.float64:
-            # -1.0 ~ 1.0 범위를 -32768 ~ 32767로 변환
-            audio_data = np.clip(audio_data, -1.0, 1.0)
-            audio_data = (audio_data * 32767).astype(np.int16)
-        else:
-            audio_data = audio_data.astype(np.int16)
-    
-    # 1차원 배열로 변환
-    if len(audio_data.shape) > 1:
-        audio_data = audio_data.flatten()
-    
-    # WAV 파일 저장
-    with wave.open(str(audio_path), 'wb') as wav_file:
-        wav_file.setnchannels(1)  # 모노
-        wav_file.setsampwidth(2)  # 16-bit
-        wav_file.setframerate(sample_rate)
-        wav_file.writeframes(audio_data.tobytes())
-
-
-def _check_model_files_exist() -> bool:
-    """Supertonic 모델 파일들이 존재하는지 확인합니다."""
-    model_paths = [
-        SUPERTONIC_MODEL_PATH,
-        SUPERTONIC_MODEL_DIR / 'assets' / 'model.onnx',
-        Path('assets') / 'model.onnx',
-    ]
-    return any(path.exists() for path in model_paths)
-
-
-def check_supertonic_model_exists() -> bool:
-    """Supertonic 모델 파일이 존재하는지 확인합니다."""
-    return _check_model_files_exist()
-
-
-def download_supertonic_model() -> bool:
-    """Supertonic 모델을 다운로드합니다."""
-    return _download_supertonic_model()
-
-
-def check_supertonic_available() -> bool:
-    """Supertonic이 사용 가능한지 확인합니다 (외부에서 호출 가능)."""
-    return _check_supertonic_available()
-

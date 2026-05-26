@@ -1,6 +1,7 @@
-discord.py>=2.3.0
+discord.py>=2.7.0  # 2.7.0+ 에서 DAVE(E2EE) 프로토콜 지원 (Discord voice 4017 close code 회피)
+davey>=0.1.5  # discord.py 2.7+ 음성 사용 시 필수 (DAVE E2EE 백엔드)
 python-dotenv>=1.0.0
-yt-dlp>=2023.10.0
+yt-dlp>=2026.3.17  # YouTube 안티봇 정책 변경으로 최신 버전 필수 (403 Forbidden 회피)
 async-timeout>=4.0.0
 rapidfuzz>=3.0.0  # fuzzywuzzy 대체 - 더 빠르고 경량
 gtts>=2.5.0
@@ -19,7 +20,8 @@ cryptography>=41.0.0  # MySQL sha256_password/caching_sha2_password 인증을 �
 tts-with-rvc-onnx>=0.1.0  # TTS와 RVC를 결합한 라이브러리 (텍스트를 바로 원하는 목소리로 변환)
 # 또는 tts-with-rvc>=0.1.0  # PyTorch 사용 버전
 
-# Supertonic TTS 지원 (초고속 온디바이스 TTS)
-onnxruntime>=1.16.0  # Supertonic TTS를 위한 ONNX Runtime
-numpy>=1.24.0  # Supertonic TTS를 위한 NumPy
-huggingface_hub>=0.19.0  # Supertonic 모델 다운로드를 위한 Hugging Face Hub (선택사항)
+# Supertonic TTS 지원 (초고속 온디바이스 TTS, 한국어 포함 31개 언어)
+supertonic>=1.2.1  # 공식 PyPI 패키지 (onnxruntime, numpy, soundfile, huggingface-hub 자동 설치)
+onnxruntime==1.19.2  # Supertonic TTS를 위한 ONNX Runtime (1.20+ 은 Windows DLL 충돌 발생)
+numpy>=1.24.0  # Supertonic TTS를 위한 NumPy (supertonic 의존성)
+huggingface_hub>=0.19.0  # Supertonic 모델 다운로드 (supertonic 의존성)
