@@ -5,6 +5,7 @@ import logging
 import discord
 from core.bot import FuzzyBot
 from core.shutdown_handler import get_shutdown_event
+from core.watchdog import connection_watchdog
 from cogs.music import Music
 from cogs.tts import TTS
 from cogs.chat_ai import ChatAI
@@ -68,13 +69,14 @@ async def run_bot(bot: FuzzyBot):
             # 봇 시작과 종료 이벤트 대기를 병렬로 처리
             bot_task = asyncio.create_task(bot.start(DISCORD_BOT_TOKEN))
             shutdown_task = asyncio.create_task(shutdown_event.wait())
-            
+            watchdog_task = asyncio.create_task(connection_watchdog(bot))
+
             # 둘 중 하나가 완료되면 종료
             done, pending = await asyncio.wait(
                 [bot_task, shutdown_task],
                 return_when=asyncio.FIRST_COMPLETED
             )
-            
+
             # 종료 신호를 받은 경우 봇 종료
             if shutdown_task in done:
                 if not bot.is_closed():
@@ -95,6 +97,14 @@ async def run_bot(bot: FuzzyBot):
                     except asyncio.CancelledError:
                         pass
                 await bot_task
+
+            # 워치독 태스크 정리
+            if not watchdog_task.done():
+                watchdog_task.cancel()
+                try:
+                    await watchdog_task
+                except asyncio.CancelledError:
+                    pass
                 
     except KeyboardInterrupt:
         logger.info("키보드 인터럽트로 봇을 종료합니다.")

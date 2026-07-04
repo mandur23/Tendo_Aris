@@ -1,12 +1,41 @@
 """Discord 봇 공통 유틸리티 함수"""
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from typing import Optional, Union
 import discord
 from discord.ext import commands
 from utils.config import COMMAND_MESSAGE_DELETE_DELAY
 
 logger = logging.getLogger(__name__)
+
+
+async def safe_defer(interaction: discord.Interaction):
+    """슬래시 명령어의 3초 응답 타임아웃을 방지하기 위해 안전하게 defer합니다.
+
+    이미 응답된 인터랙션이면 조용히 무시합니다.
+    """
+    try:
+        if not interaction.response.is_done():
+            await interaction.response.defer()
+    except (discord.InteractionResponded, discord.HTTPException) as e:
+        logger.debug(f"인터랙션 defer 실패 (무시됨): {e}")
+
+
+@asynccontextmanager
+async def safe_typing(ctx):
+    """prefix/슬래시 컨텍스트 모두에서 안전한 typing 표시 컨텍스트.
+
+    interaction 기반 Context에서 ctx.typing()은 내부적으로 defer를 호출하는데,
+    이미 defer된 경우 InteractionResponded 예외가 발생하므로 이를 방지합니다.
+    """
+    interaction = getattr(ctx, 'interaction', None)
+    if interaction is not None:
+        await safe_defer(interaction)
+        yield
+    else:
+        async with ctx.typing():
+            yield
 
 
 async def delete_command_message(ctx: commands.Context, delay: float = None):
@@ -19,11 +48,13 @@ async def delete_command_message(ctx: commands.Context, delay: float = None):
     """
     if delay is None:
         delay = COMMAND_MESSAGE_DELETE_DELAY
-    
+
     await asyncio.sleep(delay)
     try:
-        await ctx.message.delete()
-    except (discord.NotFound, discord.HTTPException, discord.Forbidden):
+        # 슬래시 명령어 기반 Context는 message가 없을 수 있음
+        if getattr(ctx, 'message', None):
+            await ctx.message.delete()
+    except (discord.NotFound, discord.HTTPException, discord.Forbidden, AttributeError):
         pass
 
 
@@ -353,42 +384,46 @@ class ConfirmView(AuthorLockedView):
         self.cancel_button.callback = self._cancel_callback
         self.add_item(self.cancel_button)
     
+    async def _disable_buttons(self, interaction: discord.Interaction):
+        """모든 버튼을 비활성화하고 View를 갱신합니다.
+
+        핸들러가 이미 interaction.response를 사용했을 수 있으므로 message.edit로 폴백합니다.
+        """
+        for item in self.children:
+            item.disabled = True
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.edit_message(view=self)
+            elif interaction.message:
+                await interaction.message.edit(view=self)
+        except Exception as e:
+            logger.debug(f"버튼 비활성화 처리 중 오류 (무시됨): {e}")
+
     async def _confirm_callback(self, interaction: discord.Interaction):
         """확인 버튼 콜백"""
         if not await self.interaction_check(interaction):
             return
-        
-        # 모든 버튼 비활성화
-        for item in self.children:
-            item.disabled = True
-        
-        try:
-            await interaction.response.edit_message(view=self)
-        except Exception as e:
-            logger.debug(f"확인 버튼 처리 중 오류: {e}")
-        
+
+        # 핸들러가 interaction.response를 사용할 수 있도록 핸들러를 먼저 실행
         if self.on_confirm_callback:
             try:
                 await self.on_confirm_callback(interaction)
             except Exception as e:
                 logger.error(f"확인 콜백 실행 중 오류: {e}")
-    
+
+        await self._disable_buttons(interaction)
+        self.stop()
+
     async def _cancel_callback(self, interaction: discord.Interaction):
         """취소 버튼 콜백"""
         if not await self.interaction_check(interaction):
             return
-        
-        # 모든 버튼 비활성화
-        for item in self.children:
-            item.disabled = True
-        
-        try:
-            await interaction.response.edit_message(view=self)
-        except Exception as e:
-            logger.debug(f"취소 버튼 처리 중 오류: {e}")
-        
+
         if self.on_cancel_callback:
             try:
                 await self.on_cancel_callback(interaction)
             except Exception as e:
                 logger.error(f"취소 콜백 실행 중 오류: {e}")
+
+        await self._disable_buttons(interaction)
+        self.stop()

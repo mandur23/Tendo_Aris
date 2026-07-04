@@ -26,6 +26,7 @@ except Exception as _onnx_e:  # pragma: no cover
 from logging_config import setup_logging
 from core.launcher import main
 from core.shutdown_handler import setup_signal_handlers
+from core.watchdog import is_restart_requested, restart_process
 
 # 깊은 task tree 에서 Task.cancel 자식 전파가 RecursionError 를 일으키는 경우에 대한 안전망.
 sys.setrecursionlimit(3000)
@@ -39,6 +40,9 @@ if __name__ == "__main__":
 
     try:
         asyncio.run(main())
+        # 워치독 또는 !재시작 명령어가 재시작을 요청한 경우 프로세스를 다시 실행
+        if is_restart_requested():
+            restart_process()
     except KeyboardInterrupt:
         logger.info("프로그램이 종료되었습니다.")
     except ValueError as e:

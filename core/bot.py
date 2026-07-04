@@ -11,6 +11,7 @@ class FuzzyBot(commands.Bot):
         super().__init__(*args, **kwargs)
         self.remove_command('help')
         self._cmd_names_cached = None
+        self._slash_synced = False
 
     def get_commands(self):
         return list(self.all_commands.values())
@@ -58,9 +59,12 @@ class FuzzyBot(commands.Bot):
 
     async def on_ready(self):
         logger.info(f'아리스가 준비 완료했어요! {self.user}로 로그인했답니다~')
-        # Slash Commands 동기화
+        # Slash Commands 동기화 (재연결 시마다 반복하면 rate limit 위험이 있어 최초 1회만)
+        if self._slash_synced:
+            return
         try:
             synced = await self.tree.sync()
+            self._slash_synced = True
             logger.info(f"Slash Commands {len(synced)}개가 동기화되었습니다.")
         except Exception as e:
             logger.error(f"Slash Commands 동기화 실패: {e}")

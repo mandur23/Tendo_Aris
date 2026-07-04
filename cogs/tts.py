@@ -1,12 +1,14 @@
 """TTS (Text-to-Speech) 명령어 Cog"""
 import asyncio
 import logging
+import re
 import discord
 from discord.ext import commands
 from pathlib import Path
 from utils.tts_utils import text_to_speech, cleanup_tts_file, VOICE_MODELS
 from utils.file_utils import load_tts_settings, save_tts_settings
 from utils.config import COMMAND_MESSAGE_DELETE_DELAY, FFMPEG_PATH
+from utils.discord_utils import safe_defer, safe_typing
 from utils.rvc_utils import (
     _check_rvc_available, add_rvc_model, remove_rvc_model,
     get_all_rvc_models, get_rvc_model, text_to_speech_with_rvc_async,
@@ -19,6 +21,11 @@ from utils.supertonic_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+# TTS 읽기 전처리용 정규식
+_URL_RE = re.compile(r'https?://\S+')
+_CUSTOM_EMOJI_RE = re.compile(r'<a?:\w+:\d+>')
+_REPEAT_CHAR_RE = re.compile(r'(.)\1{3,}')
 
 
 class TTS(commands.Cog):
@@ -79,10 +86,33 @@ class TTS(commands.Cog):
         settings = self.get_user_settings(user_id, guild_id)
         return settings.get('enabled', False)
 
+    @staticmethod
+    def preprocess_tts_text(text: str) -> str:
+        """메시지를 TTS로 읽기 좋게 정리합니다.
+
+        - URL은 '링크'로 치환
+        - 커스텀 이모지 태그(<:이름:id>)는 제거
+        - 같은 문자 4회 이상 반복은 3회로 축약 (예: ㅋㅋㅋㅋㅋㅋ → ㅋㅋㅋ)
+        - 멘션 기호(@)는 제거하고 잔여 공백을 정리
+        """
+        if not text:
+            return ''
+        text = _URL_RE.sub('링크', text)
+        text = _CUSTOM_EMOJI_RE.sub('', text)
+        text = _REPEAT_CHAR_RE.sub(lambda m: m.group(1) * 3, text)
+        text = text.replace('@', '')
+        text = re.sub(r'\s+', ' ', text)
+        return text.strip()
+
 
     async def play_tts(self, ctx, text: str, lang: str = 'ko', voice_model: str = '기본', slow: bool = False, use_rvc: bool = False, rvc_model: str = None, use_supertonic: bool = False, supertonic_voice: str = 'default'):
         """TTS를 재생합니다."""
         tts_file = None
+        # 예외 핸들러에서 참조되므로 TTS 생성 전에 미리 초기화 (UnboundLocalError 방지)
+        music_player = None
+        volume_lowered = False
+        music_was_playing = False
+        music_was_paused = False
         try:
             # 텍스트 유효성 검사
             if not text or not text.strip():
@@ -166,11 +196,7 @@ class TTS(commands.Cog):
             
             # 음악 재생 중이면 일시정지
             music_cog = self.bot.get_cog('Music')
-            music_player = None
-            volume_lowered = False
-            music_was_playing = False
-            music_was_paused = False
-            
+
             if ctx.voice_client.is_playing() and music_cog:
                 guild_id = ctx.guild.id if hasattr(ctx, 'guild') else None
                 if guild_id and guild_id in music_cog.players:
@@ -522,8 +548,8 @@ class TTS(commands.Cog):
         if not self.is_user_active(message.author.id, message.guild.id):
             return
         
-        # 텍스트가 너무 짧거나 길면 무시
-        text = message.content.strip()
+        # 멘션은 닉네임으로 표시되는 clean_content를 사용하고, URL/이모지/반복 문자를 정리
+        text = self.preprocess_tts_text(message.clean_content)
         if not text or len(text) > 200:
             return
         
@@ -592,13 +618,18 @@ class TTS(commands.Cog):
             await self.delete_command_message(ctx)
             return
 
-        # 텍스트가 있으면 즉시 읽기
+        # 텍스트가 있으면 즉시 읽기 (URL/이모지/반복 문자 정리)
+        text = self.preprocess_tts_text(text)
+        if not text:
+            await ctx.send("선생님, 읽을 수 있는 내용이 없어요!", delete_after=10)
+            await self.delete_command_message(ctx)
+            return
         if len(text) > 200:
             await ctx.send("선생님, 텍스트가 너무 길어요! 200자 이하로 입력해주세요~", delete_after=12)
             await self.delete_command_message(ctx)
             return
 
-        async with ctx.typing():
+        async with safe_typing(ctx):
             settings = self.get_user_settings(ctx.author.id, ctx.guild.id)
             success = await self.play_tts(
                 ctx,
@@ -1323,21 +1354,25 @@ class TTS(commands.Cog):
     @discord.app_commands.describe(text="읽을 텍스트 (입력하지 않으면 자동 읽기 모드 토글)")
     async def slash_tts(self, interaction: discord.Interaction, text: str = None):
         """Slash Command로 TTS 자동 읽기 모드 토글 또는 텍스트 읽기"""
+        await safe_defer(interaction)
         ctx = await self.bot.get_context(interaction)
         await self.tts_command(ctx, text=text)
-    
+
     async def slash_tts_voice(self, interaction: discord.Interaction):
         """Slash Command로 TTS 목소리 모델 변경"""
+        await safe_defer(interaction)
         ctx = await self.bot.get_context(interaction)
         await self.tts_voice_command(ctx)
-    
+
     async def slash_tts_slow(self, interaction: discord.Interaction):
         """Slash Command로 TTS 느린 속도 모드 토글"""
+        await safe_defer(interaction)
         ctx = await self.bot.get_context(interaction)
         await self.tts_slow_toggle(ctx)
-    
+
     async def slash_tts_settings(self, interaction: discord.Interaction):
         """Slash Command로 현재 TTS 설정 확인"""
+        await safe_defer(interaction)
         ctx = await self.bot.get_context(interaction)
         await self.tts_settings_command(ctx)
     

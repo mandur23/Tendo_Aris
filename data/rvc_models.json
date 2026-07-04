@@ -1,37 +1,30 @@
 {
     "chisajp_e440_s12320_rvcv2_rmvpe": {
-        "model_path": "C:\\Users\\User\\PycharmProjects\\Tendo_Aris\\models\\ChisaJP_e440_s12320_RVCv2_RMVPE\\ChisaJP_e440_s12320.pth",
-        "index_path": "C:\\Users\\User\\PycharmProjects\\Tendo_Aris\\models\\ChisaJP_e440_s12320_RVCv2_RMVPE\\added_IVF736_Flat_nprobe_1_ChisaJP_v2.index",
+        "model_path": "C:\\Users\\nano\\PycharmProjects\\Tendo_Aris\\models\\ChisaJP_e440_s12320_RVCv2_RMVPE\\ChisaJP_e440_s12320.pth",
+        "index_path": "C:\\Users\\nano\\PycharmProjects\\Tendo_Aris\\models\\ChisaJP_e440_s12320_RVCv2_RMVPE\\added_IVF736_Flat_nprobe_1_ChisaJP_v2.index",
         "name": "ChisaJP_e440_s12320_RVCv2_RMVPE",
         "lang": "ja",
         "is_rvc": true
     },
-    "gumirvc": {
-        "model_path": "C:\\Users\\User\\PycharmProjects\\Tendo_Aris\\models\\gumiRvc\\gumiRvc_150e_5250s.pth",
-        "index_path": "C:\\Users\\User\\PycharmProjects\\Tendo_Aris\\models\\gumiRvc\\gumiRvc.index",
-        "name": "gumiRvc",
+    "kohane_act2": {
+        "model_path": "C:\\Users\\nano\\PycharmProjects\\Tendo_Aris\\models\\kohane_act2\\kohane_act2_800e_16000s.pth",
+        "index_path": "C:\\Users\\nano\\PycharmProjects\\Tendo_Aris\\models\\kohane_act2\\kohane_act2.index",
+        "name": "kohane_act2",
+        "lang": "ko",
+        "is_rvc": true
+    },
+    "nell_klm43x4_share_free": {
+        "model_path": "C:\\Users\\nano\\PycharmProjects\\Tendo_Aris\\models\\NELL_KLM43x4_Share_Free\\Voice_NELL_KLM43x4.pth",
+        "index_path": "C:\\Users\\nano\\PycharmProjects\\Tendo_Aris\\models\\NELL_KLM43x4_Share_Free\\added_Voice_NELL_KLM43x4_v2.index",
+        "name": "NELL_KLM43x4_Share_Free",
         "lang": "ja",
         "is_rvc": true
     },
-    "chocola_yagiyuki_act2_32k": {
-        "model_path": "C:\\Users\\User\\PycharmProjects\\Tendo_Aris\\models\\chocola_yagiyuki_act2_32k\\chocola_yagiyuki_act2_32k_750e_23250s.pth",
-        "index_path": "C:\\Users\\User\\PycharmProjects\\Tendo_Aris\\models\\chocola_yagiyuki_act2_32k\\chocola_yagiyuki_act2_32k.index",
-        "name": "chocola_yagiyuki_act2_32k",
+    "shizuku_act2": {
+        "model_path": "C:\\Users\\nano\\PycharmProjects\\Tendo_Aris\\models\\shizuku_act2\\shizuku_act2_900e_10800s.pth",
+        "index_path": "C:\\Users\\nano\\PycharmProjects\\Tendo_Aris\\models\\shizuku_act2\\shizuku_act2.index",
+        "name": "shizuku_act2",
         "lang": "ja",
-        "is_rvc": true
-    },
-    "seia": {
-        "model_path": "C:\\Users\\User\\PycharmProjects\\Tendo_Aris\\models\\seia\\seia_350e_14000s.pth",
-        "index_path": "C:\\Users\\User\\PycharmProjects\\Tendo_Aris\\models\\seia\\added_seia_v2.index",
-        "name": "seia",
-        "lang": "ja",
-        "is_rvc": true
-    },
-    "senseibluarsip_e250_32k": {
-        "model_path": "C:\\Users\\User\\PycharmProjects\\Tendo_Aris\\models\\senseibluarsip_E250_32k\\senseibluarsip32kV15_e250_s7250.pth",
-        "index_path": "C:\\Users\\User\\PycharmProjects\\Tendo_Aris\\models\\senseibluarsip_E250_32k\\added_IVF838_Flat_nprobe_1_senseibluarsip32kV15_v2.index",
-        "name": "senseibluarsip_E250_32k",
-        "lang": "en",
         "is_rvc": true
     }
 }

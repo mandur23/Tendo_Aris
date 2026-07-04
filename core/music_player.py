@@ -23,7 +23,6 @@ class MusicPlayer:
 
         self.np = None
         self.volume = DEFAULT_VOLUME
-        self.original_volume = DEFAULT_VOLUME  # TTS 재생 전 원래 볼륨 저장
         self.current = None
         self.loop = False
         self.queue_loop = False
@@ -199,7 +198,11 @@ class MusicPlayer:
         async def on_voice_state_update(member, before, after):
             if self._shutdown:
                 return
-            
+
+            # 전역 리스너이므로 다른 서버의 음성 이벤트는 무시 (비활동 타이머 오염 방지)
+            if member.guild.id != self.guild.id:
+                return
+
             self.last_activity.set()
             
             # voice_client가 없으면 무시
@@ -233,38 +236,48 @@ class MusicPlayer:
                     )
                     return
                 
-            if before.channel is not None and after.channel is None:
-                if member == self.guild.me:
-                    return
+            # 봇이 있는 채널에서 사람이 나가거나 다른 채널로 이동한 경우에만 빈 채널 검사
+            if member.bot:
+                return
 
-                if len(before.channel.members) > 1:
-                    return
+            bot_channel = self.guild.voice_client.channel if self.guild.voice_client else None
+            if not bot_channel:
+                return
+            if before.channel != bot_channel or after.channel == bot_channel:
+                return
 
+            # 봇 채널에 남은 사람(봇 제외)이 있으면 아무것도 하지 않음
+            if any(not m.bot for m in bot_channel.members):
+                return
+
+            try:
+                if self.guild.voice_client and self.guild.voice_client.is_connected():
+                    self.guild.voice_client.pause()
+            except Exception as e:
+                logger.debug(f"일시정지 중 오류 (무시됨): {e}")
+
+            await asyncio.sleep(10)
+            if self._shutdown:
+                return
+
+            # 10초 사이에 누군가 돌아왔으면 재생 재개
+            bot_channel = self.guild.voice_client.channel if self.guild.voice_client else None
+            if bot_channel and any(not m.bot for m in bot_channel.members):
                 try:
-                    if self.guild.voice_client and self.guild.voice_client.is_connected():
-                        await self.guild.voice_client.pause()
+                    if self.guild.voice_client.is_paused():
+                        self.guild.voice_client.resume()
                 except Exception as e:
-                    logger.debug(f"일시정지 중 오류 (무시됨): {e}")
-                    
-                await asyncio.sleep(10)
-                if not self._shutdown:
-                    await self.stop()
-                
-                try:
-                    message = await member.send("아리스가 음성 채널에서 나가요. 다음에 또 불러주세요!")
-                    await asyncio.sleep(3)
-                    await message.delete()
-                except Exception as e:
-                    logger.debug(f"메시지 전송/삭제 중 오류 (무시됨): {e}")
+                    logger.debug(f"재개 중 오류 (무시됨): {e}")
+                return
 
-            if after.channel is not None and member != self.guild.me:
-                if len(after.channel.members) == 1:
-                    try:
-                        if self.guild.voice_client and self.guild.voice_client.is_connected():
-                            await self.guild.voice_client.disconnect()
-                            await member.send("아리스가 음성 채널에서 나가요. 다음에 또 불러주세요!")
-                    except Exception as e:
-                        logger.debug(f"연결 해제 중 오류 (무시됨): {e}")
+            await self.stop()
+
+            try:
+                message = await member.send("아리스가 음성 채널에서 나가요. 다음에 또 불러주세요!")
+                await asyncio.sleep(3)
+                await message.delete()
+            except Exception as e:
+                logger.debug(f"메시지 전송/삭제 중 오류 (무시됨): {e}")
         
         # 이벤트 리스너 등록
         self._voice_state_listener = on_voice_state_update
@@ -314,6 +327,23 @@ class MusicPlayer:
 
             if source is None:
                 break
+
+            # 랜덤 재생: 대기열에 남은 곡들 중에서 무작위로 선택 (단일 소비자인 이 루프에서만 수행)
+            if self.random_play and not self._shutdown and not self.queue.empty():
+                candidates = [source]
+                while not self.queue.empty():
+                    try:
+                        item = self.queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    if item is None:
+                        # 종료 센티넬은 다시 넣고 중단
+                        self.queue.put_nowait(None)
+                        break
+                    candidates.append(item)
+                source = candidates.pop(random.randrange(len(candidates)))
+                for item in candidates:
+                    self.queue.put_nowait(item)
 
             if not isinstance(source, dict):
                 try:
@@ -485,14 +515,16 @@ class MusicPlayer:
         # 메시지 삭제
         await self.delete_messages()
         
-        # 모든 백그라운드 태스크 취소
-        for task in self._tasks:
+        # 모든 백그라운드 태스크 취소 (stop()을 호출한 태스크 자신은 제외해 자기 취소로 인한 정리 중단 방지)
+        current_task = asyncio.current_task()
+        tasks_to_cancel = [t for t in self._tasks if t is not current_task]
+        for task in tasks_to_cancel:
             if not task.done():
                 task.cancel()
-        
-        if self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
-        
+
+        if tasks_to_cancel:
+            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+
         self._tasks.clear()
         
         # 이벤트 리스너 제거
@@ -586,9 +618,6 @@ class MusicPlayer:
 
                 random_play.style = discord.ButtonStyle.success if self.random_play else discord.ButtonStyle.secondary
                 await interaction.message.edit(view=view)
-
-                if self.random_play:
-                    await self.play_next()
             except discord.errors.NotFound:
                 logger.debug("인터랙션 응답 시간 초과 (무시됨)")
             except Exception as e:
@@ -694,100 +723,6 @@ class MusicPlayer:
 
     def destroy(self, guild):
         return self.bot.loop.create_task(self.cog.cleanup(guild))
-
-    async def play_next(self):
-        if self.queue.empty():
-            return
-
-        if self.guild.voice_client is None:
-            if self.voice_channel:
-                await self.voice_channel.connect()
-            elif self.channel.guild.me.voice and self.channel.guild.me.voice.channel:
-                voice_channel = self.channel.guild.me.voice.channel
-                await voice_channel.connect()
-            else:
-                return
-
-        if self.loop and self.current:
-            source = self.current
-        elif self.random_play and self.queue._queue:
-            queue_list = list(self.queue._queue)
-            index = random.randrange(len(queue_list))
-            source = queue_list[index]
-            for _ in range(self.queue.qsize()):
-                item = await self.queue.get()
-                if item == source:
-                    break
-                await self.queue.put(item)
-        else:
-            source = await self.queue.get()
-
-        if self.loop and not self.random_play:
-            await self.queue.put(source)
-
-        if not isinstance(source, dict):
-            try:
-                ydl = create_ytdl_instance()
-                source = await self.bot.loop.run_in_executor(None, lambda: ydl.extract_info(source, download=False))
-            except Exception as e:
-                await safe_send(self.channel, f'어머나, 오류가 발생했어요: {str(e)}')
-                return
-
-        if self.current_message:
-            await safe_delete_message(self.current_message)
-        if self.button_message:
-            await safe_delete_message(self.button_message)
-
-        self.current = source
-        self.current_message = await safe_send(
-            self.channel,
-            f'선생님, 지금 재생 중인 노래예요: {source["title"]}\n주소: {source.get("webpage_url", "알 수 없음")}'
-        )
-        self.button_message, view = await self.create_player_message()
-
-        await self.update_button_styles(view)
-
-        try:
-            # 재생 시작 시간 기록
-            import time
-            self.playback_start_time = time.time()
-            self.paused_at_position = 0
-            
-            self.guild.voice_client.play(
-                discord.FFmpegPCMAudio(source['url'], executable=ffmpeg_path,
-                                       before_options=ffmpeg_options['before_options'],
-                                       options=ffmpeg_options['options']),
-                after=lambda _: self.bot.loop.call_soon_threadsafe(self.next.set)
-            )
-            self.guild.voice_client.source = discord.PCMVolumeTransformer(self.guild.voice_client.source)
-            self.guild.voice_client.source.volume = self.volume
-        except Exception as e:
-            await safe_send(self.channel, f"앗, 재생 중에 문제가 생겼어요: {str(e)}", delete_after=10)
-            logger.error(f"상세 오류 정보: {e.__class__.__name__}: {str(e)}")
-            
-            if self.random_play:
-                await asyncio.sleep(1)
-
-    def lower_volume_for_tts(self):
-        """TTS 재생을 위해 음악 볼륨을 50%로 낮춥니다."""
-        if self.guild.voice_client and self.guild.voice_client.source:
-            # 원래 볼륨 저장
-            if hasattr(self.guild.voice_client.source, 'volume'):
-                self.original_volume = self.guild.voice_client.source.volume
-                # 볼륨을 50%로 감소
-                self.guild.voice_client.source.volume = self.original_volume * 0.5
-                logger.debug(f"음악 볼륨을 {self.original_volume * 100:.0f}%에서 {self.original_volume * 50:.0f}%로 감소")
-                return True
-        return False
-
-    def restore_volume_after_tts(self):
-        """TTS 재생 후 음악 볼륨을 원래대로 복원합니다."""
-        if self.guild.voice_client and self.guild.voice_client.source:
-            if hasattr(self.guild.voice_client.source, 'volume'):
-                self.guild.voice_client.source.volume = self.original_volume
-                logger.debug(f"음악 볼륨을 {self.original_volume * 100:.0f}%로 복원")
-                return True
-        return False
 
     async def resume_after_tts(self):
         """TTS 재생 후 음악을 일시정지된 위치부터 다시 재생합니다."""

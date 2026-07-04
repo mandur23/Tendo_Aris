@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 import discord
 from discord.ext import commands
 from discord.app_commands import command, describe, choices, Choice
@@ -9,7 +10,11 @@ from core.music_player import MusicPlayer
 from utils.ytdl_utils import create_ytdl_instance, ytdl_format_options
 from utils.file_utils import load_history, save_history, load_playlists, save_playlists, ensure_logs_dir, LOGS_DIR
 from utils.config import MAX_HISTORY_ITEMS, MAX_EXTRACT_RETRIES, COMMAND_MESSAGE_DELETE_DELAY, USE_MYSQL
-from utils.discord_utils import delete_command_message, ensure_voice_client, safe_send, handle_extract_error, ConfirmView, AuthorLockedView
+from utils.discord_utils import (
+    delete_command_message, ensure_voice_client, safe_send, handle_extract_error,
+    ConfirmView, AuthorLockedView, safe_defer, safe_typing
+)
+from core.watchdog import request_restart
 from utils.db_utils import (
     init_db_pool, close_db_pool, load_history_from_db, save_history_to_db,
     add_history_item_to_db, get_history_from_db, load_playlists_from_db,
@@ -31,62 +36,6 @@ class Music(commands.Cog):
         self.music_group = None
         self.playlist_group = None
         self.history_group = None
-
-    async def cog_load(self):
-        """Cog가 로드될 때 실행됩니다."""
-        if USE_MYSQL:
-            try:
-                await init_db_pool()
-                # 비동기로 데이터 로드 (데이터베이스 우선)
-                db_history = await load_history_from_db()
-                db_playlists = await load_playlists_from_db()
-                
-                # 데이터베이스에 데이터가 없으면 JSON 파일에서 fallback (데이터베이스 우선)
-                if not db_history:
-                    logger.info("데이터베이스에 히스토리가 없습니다. JSON 파일에서 로드합니다.")
-                    from utils.file_utils import load_history_from_json_file
-                    json_history = load_history_from_json_file()
-                    if json_history:
-                        self.history = json_history
-                        logger.info(f"JSON 파일에서 히스토리 {sum(len(items) for items in json_history.values())}개 항목 로드")
-                    else:
-                        self.history = {}
-                else:
-                    self.history = db_history
-                    logger.info(f"MySQL에서 히스토리 {sum(len(items) for items in db_history.values())}개 항목 로드")
-                
-                if not db_playlists:
-                    logger.info("데이터베이스에 플레이리스트가 없습니다. JSON 파일에서 로드합니다.")
-                    from utils.file_utils import load_playlists_from_json_file
-                    json_playlists = load_playlists_from_json_file()
-                    if json_playlists:
-                        self.playlists = json_playlists
-                        logger.info(f"JSON 파일에서 플레이리스트 로드")
-                    else:
-                        self.playlists = {}
-                else:
-                    self.playlists = db_playlists
-                    logger.info("MySQL에서 플레이리스트 로드")
-                    
-            except Exception as e:
-                logger.error(f"MySQL 초기화 실패: {e}")
-                logger.warning("JSON 파일 사용 모드로 전환합니다.")
-                # MySQL 실패 시 JSON 파일에서 로드
-                from utils.file_utils import load_history_from_json_file, load_playlists_from_json_file
-                self.history = load_history_from_json_file()
-                self.playlists = load_playlists_from_json_file()
-
-    async def cog_unload(self):
-        """Cog가 언로드될 때 실행됩니다."""
-        for guild_id in list(self.players):
-            try:
-                guild = self.bot.get_guild(guild_id)
-                if guild:
-                    await self.cleanup(guild)
-            except Exception as e:
-                logger.debug(f"cog_unload cleanup guild {guild_id} 중 오류 (무시됨): {e}")
-        if USE_MYSQL:
-            await close_db_pool()
 
     async def save_history(self):
         """히스토리를 저장합니다."""
@@ -177,7 +126,7 @@ class Music(commands.Cog):
     @commands.command(name='play', aliases=['p', '재생', '플레이'])
     async def play_command(self, ctx, *, url):
         """YouTube URL을 재생합니다. (URL 검증 개선)"""
-        async with ctx.typing():
+        async with safe_typing(ctx):
             try:
                 if not url.startswith(('http://', 'https://', 'ytsearch:')):
                     url = f"ytsearch:{url}"
@@ -253,7 +202,8 @@ class Music(commands.Cog):
         player = self.get_player(ctx)
         if 0 <= volume <= 100:
             player.volume = volume / 100
-            ctx.voice_client.source.volume = player.volume
+            if ctx.voice_client.source and hasattr(ctx.voice_client.source, 'volume'):
+                ctx.voice_client.source.volume = player.volume
             await ctx.send(f"볼륨을 {volume}%로 맞췄어요! 이제 잘 들리나요?", delete_after=10)
         else:
             await ctx.send("앗, 볼륨은 0에서 100 사이로 해주세요~ 아리스의 귀가 아파요!", delete_after=12)
@@ -291,6 +241,74 @@ class Music(commands.Cog):
         except Exception as e:
             await ctx.send(f"대기열을 표시하는 중 오류가 발생했어요: {e}", delete_after=12)
 
+        await delete_command_message(ctx)
+
+    @commands.command(name='지금', aliases=['nowplaying', 'np', '현재곡'])
+    async def now_playing(self, ctx):
+        """현재 재생 중인 노래와 진행 상황을 보여줍니다."""
+        player = self.players.get(ctx.guild.id)
+        vc = ctx.voice_client
+
+        if not player or not player.current or not vc or not (vc.is_playing() or vc.is_paused()):
+            await ctx.send("선생님, 지금 재생 중인 노래가 없어요!", delete_after=10)
+            await delete_command_message(ctx)
+            return
+
+        source = player.current
+        if isinstance(source, dict):
+            title = source.get('title', '알 수 없는 제목')
+            url = source.get('webpage_url', '')
+            duration = source.get('duration') or 0
+        else:
+            title = str(source)
+            url = ''
+            duration = 0
+
+        # 현재 재생 위치 계산 (TTS 재개용 위치 추적 정보 재활용)
+        if vc.is_paused() or player.paused_at_time is not None:
+            position = player.paused_at_position
+        elif player.playback_start_time:
+            position = max(0.0, time.time() - player.playback_start_time)
+        else:
+            position = player.paused_at_position
+
+        def _fmt(seconds):
+            seconds = int(seconds)
+            if seconds >= 3600:
+                return f"{seconds // 3600}:{(seconds % 3600) // 60:02d}:{seconds % 60:02d}"
+            return f"{seconds // 60}:{seconds % 60:02d}"
+
+        if duration and duration > 0:
+            position = min(position, duration)
+            filled = min(19, int(position / duration * 20))
+            bar = '▬' * filled + '🔘' + '▬' * (20 - filled - 1)
+            time_line = f"{_fmt(position)} / {_fmt(duration)}"
+        else:
+            bar = '🔘' + '▬' * 19
+            time_line = f"{_fmt(position)} / 길이 알 수 없음"
+
+        status = "⏸️ 일시정지" if vc.is_paused() else "▶️ 재생 중"
+        modes = []
+        if player.loop:
+            modes.append("한 곡 반복")
+        if player.queue_loop:
+            modes.append("전체 반복")
+        if player.random_play:
+            modes.append("랜덤 재생")
+        mode_text = ", ".join(modes) if modes else "일반 재생"
+
+        embed = discord.Embed(
+            title="🎵 지금 재생 중",
+            description=f"[{title}]({url})" if url else title,
+            color=0x3498db
+        )
+        embed.add_field(name="진행", value=f"`{bar}`\n{time_line}", inline=False)
+        embed.add_field(name="상태", value=status, inline=True)
+        embed.add_field(name="볼륨", value=f"{int(player.volume * 100)}%", inline=True)
+        embed.add_field(name="재생 모드", value=mode_text, inline=True)
+        embed.add_field(name="대기열", value=f"{player.queue.qsize()}곡 대기 중", inline=True)
+
+        await ctx.send(embed=embed, delete_after=30)
         await delete_command_message(ctx)
 
     # ========== 플레이리스트 관련 명령어 ==========
@@ -438,8 +456,6 @@ class Music(commands.Cog):
 
         await ctx.send(f"선생님의 '{name}' 플레이리스트의 모든 곡을 대기열에 추가했어요!", delete_after=10)
         await delete_command_message(ctx)
-        if not player.is_playing:
-            await player.play_next()
 
     @commands.command(name='플레이리스트삭제', aliases=['플래이리스트삭제', 'playrestdelete'])
     async def 플레이리스트삭제(self, ctx):
@@ -728,7 +744,6 @@ class Music(commands.Cog):
         
         if not player.is_playing:
             await ctx.send(f"선생님, 히스토리에서 '{title}'을(를) 다시 재생할게요!", delete_after=10)
-            await player.play_next()
         else:
             await ctx.send(f"선생님, 히스토리에서 '{title}'을(를) 대기열에 추가했어요!", delete_after=10)
         
@@ -868,7 +883,6 @@ class Music(commands.Cog):
         
         if not player.is_playing and added_count > 0:
             await ctx.send(f"선생님, {target_date_str}에 들었던 {added_count}곡을 대기열에 추가하고 재생할게요!", delete_after=10)
-            await player.play_next()
         else:
             await ctx.send(f"선생님, {target_date_str}에 들었던 {added_count}곡을 대기열에 추가했어요!", delete_after=10)
         
@@ -997,9 +1011,8 @@ class Music(commands.Cog):
                 
                 if not player.is_playing and added_count > 0:
                     await add_interaction.response.send_message(
-                        f"선생님, {formatted_date}에 들었던 {added_count}곡을 대기열에 추가하고 재생할게요!", 
+                        f"선생님, {formatted_date}에 들었던 {added_count}곡을 대기열에 추가하고 재생할게요!",
                         ephemeral=True, delete_after=5)
-                    await player.play_next()
                 else:
                     await add_interaction.response.send_message(
                         f"선생님, {formatted_date}에 들었던 {added_count}곡을 대기열에 추가했어요!", 
@@ -1081,7 +1094,6 @@ class Music(commands.Cog):
         
         if not player.is_playing and added_count > 0:
             await ctx.send(f"선생님, 이번 주에 들었던 {added_count}곡을 대기열에 추가하고 재생할게요!", delete_after=10)
-            await player.play_next()
         else:
             await ctx.send(f"선생님, 이번 주에 들었던 {added_count}곡을 대기열에 추가했어요!", delete_after=10)
         
@@ -1113,7 +1125,7 @@ class Music(commands.Cog):
         """모든 사용 가능한 명령어와 설명을 보여줍니다."""
         # 명령어를 카테고리별로 분류
         categories = {
-            "음악": ["play", "stop", "leave", "volume", "queue"],
+            "음악": ["play", "stop", "leave", "volume", "queue", "지금"],
             "플레이리스트": ["플레이리스트", "플레이리스트추가", "플레이리스트재생", "플레이리스트삭제", "플레이리스트노래삭제"],
             "히스토리": ["히스토리", "다시재생", "히스토리삭제", "날짜별재생", "이번주재생", "큐로그"],
             "TTS": ["tts", "tts목소리", "tts느리게", "tts설정"],
@@ -1218,6 +1230,44 @@ class Music(commands.Cog):
         view.message = message
         await delete_command_message(ctx)
 
+    @commands.command(name='재시작', aliases=['restart'])
+    @commands.has_permissions(administrator=True)
+    async def restart_bot(self, ctx):
+        """봇을 재시작합니다."""
+        async def on_confirm(interaction):
+            await interaction.response.send_message(
+                "아리스가 재시작할게요! 금방 돌아올 테니 잠시만 기다려주세요, 선생님!",
+                ephemeral=False,
+                delete_after=10
+            )
+            request_restart()
+            await self.bot.close()
+
+        async def on_cancel(interaction):
+            await interaction.response.send_message(
+                "봇 재시작이 취소되었어요.",
+                ephemeral=True,
+                delete_after=5
+            )
+
+        confirm_view = ConfirmView(
+            author_id=ctx.author.id,
+            confirm_label="재시작하기",
+            cancel_label="취소하기",
+            confirm_style=discord.ButtonStyle.danger,
+            timeout=30.0,
+            on_confirm=on_confirm,
+            on_cancel=on_cancel
+        )
+
+        message = await ctx.send(
+            "선생님, 정말로 봇을 재시작할까요?",
+            view=confirm_view,
+            delete_after=30
+        )
+        confirm_view.message = message
+        await delete_command_message(ctx)
+
     @commands.command(name='종료봇', aliases=['exit'])
     @commands.has_permissions(administrator=True)
     async def exit_bot(self, ctx):
@@ -1261,40 +1311,79 @@ class Music(commands.Cog):
     @discord.app_commands.describe(query="YouTube URL 또는 검색어")
     async def slash_play(self, interaction: discord.Interaction, query: str):
         """Slash Command로 음악 재생"""
-        # Context 객체 생성
+        await safe_defer(interaction)
         ctx = await self.bot.get_context(interaction)
         await self.play_command(ctx, url=query)
-    
+
     async def slash_stop(self, interaction: discord.Interaction):
         """Slash Command로 음악 정지"""
+        await safe_defer(interaction)
         ctx = await self.bot.get_context(interaction)
         await self.stop(ctx)
-    
+
     @discord.app_commands.describe(volume="볼륨 값 (0-100)")
     async def slash_volume(self, interaction: discord.Interaction, volume: int):
         """Slash Command로 볼륨 설정"""
+        await safe_defer(interaction)
         ctx = await self.bot.get_context(interaction)
         await self.volume(ctx, volume)
-    
+
     async def slash_queue(self, interaction: discord.Interaction):
         """Slash Command로 대기열 표시"""
+        await safe_defer(interaction)
         ctx = await self.bot.get_context(interaction)
         await self.queue(ctx)
-    
+
     @discord.app_commands.describe(page="페이지 번호 (기본값: 1)")
     async def slash_history(self, interaction: discord.Interaction, page: int = 1):
         """Slash Command로 히스토리 표시"""
+        await safe_defer(interaction)
         ctx = await self.bot.get_context(interaction)
         await self.show_history(ctx, page)
-    
+
     @discord.app_commands.describe(index="히스토리 번호 (기본값: 1)")
     async def slash_replay(self, interaction: discord.Interaction, index: int = 1):
         """Slash Command로 히스토리에서 재생"""
+        await safe_defer(interaction)
         ctx = await self.bot.get_context(interaction)
         await self.replay_from_history(ctx, index)
+
+    async def slash_now_playing(self, interaction: discord.Interaction):
+        """Slash Command로 현재 재생 곡 표시"""
+        await safe_defer(interaction)
+        ctx = await self.bot.get_context(interaction)
+        await self.now_playing(ctx)
+
+    async def slash_playlist_list(self, interaction: discord.Interaction):
+        """Slash Command로 플레이리스트 목록 보기"""
+        await safe_defer(interaction)
+        ctx = await self.bot.get_context(interaction)
+        await self.플레이리스트(ctx)
+
+    @discord.app_commands.describe(name="플레이리스트 이름", urls="추가할 URL들 (공백으로 구분)")
+    async def slash_playlist_add(self, interaction: discord.Interaction, name: str, urls: str):
+        """Slash Command로 플레이리스트에 곡 추가"""
+        await safe_defer(interaction)
+        ctx = await self.bot.get_context(interaction)
+        await self.플레이리스트추가(ctx, name, *urls.split())
+
+    @discord.app_commands.describe(name="재생할 플레이리스트 이름")
+    async def slash_playlist_play(self, interaction: discord.Interaction, name: str):
+        """Slash Command로 플레이리스트 재생"""
+        await safe_defer(interaction)
+        ctx = await self.bot.get_context(interaction)
+        await self.플레이리스트재생(ctx, name)
+
+    async def slash_playlist_delete(self, interaction: discord.Interaction):
+        """Slash Command로 플레이리스트 삭제"""
+        await safe_defer(interaction)
+        ctx = await self.bot.get_context(interaction)
+        await self.플레이리스트삭제(ctx)
     
     async def cog_load(self):
-        """Cog가 로드될 때 Slash Commands 등록"""
+        """Cog가 로드될 때 데이터 로드 및 Slash Commands 등록"""
+        await self._load_data()
+
         # 이미 등록된 명령어가 있으면 제거
         try:
             self.bot.tree.remove_command("음악")
@@ -1319,7 +1408,14 @@ class Music(commands.Cog):
         self.music_group.command(name="정지", description="음악 재생을 종료합니다")(self.slash_stop)
         self.music_group.command(name="볼륨", description="볼륨을 설정합니다 (0-100)")(self.slash_volume)
         self.music_group.command(name="대기열", description="현재 재생 목록을 표시합니다")(self.slash_queue)
-        
+        self.music_group.command(name="지금", description="현재 재생 중인 노래와 진행 상황을 보여줍니다")(self.slash_now_playing)
+
+        # 플레이리스트 그룹 (빈 그룹은 동기화 시 오류가 발생하므로 반드시 명령어를 등록)
+        self.playlist_group.command(name="목록", description="플레이리스트 목록을 보여줍니다")(self.slash_playlist_list)
+        self.playlist_group.command(name="추가", description="플레이리스트에 곡을 추가합니다")(self.slash_playlist_add)
+        self.playlist_group.command(name="재생", description="플레이리스트를 재생합니다")(self.slash_playlist_play)
+        self.playlist_group.command(name="삭제", description="플레이리스트를 삭제합니다")(self.slash_playlist_delete)
+
         self.history_group.command(name="히스토리", description="재생 기록을 보여줍니다")(self.slash_history)
         self.history_group.command(name="다시재생", description="히스토리에서 노래를 다시 재생합니다")(self.slash_replay)
         
@@ -1327,9 +1423,66 @@ class Music(commands.Cog):
         self.bot.tree.add_command(self.music_group, override=True)
         self.bot.tree.add_command(self.playlist_group, override=True)
         self.bot.tree.add_command(self.history_group, override=True)
-    
+
+    async def _load_data(self):
+        """히스토리/플레이리스트를 로드합니다. (MySQL 우선, 실패 시 JSON)"""
+        if not USE_MYSQL:
+            return
+
+        try:
+            await init_db_pool()
+            # 비동기로 데이터 로드 (데이터베이스 우선)
+            db_history = await load_history_from_db()
+            db_playlists = await load_playlists_from_db()
+
+            # 데이터베이스에 데이터가 없으면 JSON 파일에서 fallback (데이터베이스 우선)
+            if not db_history:
+                logger.info("데이터베이스에 히스토리가 없습니다. JSON 파일에서 로드합니다.")
+                from utils.file_utils import load_history_from_json_file
+                json_history = load_history_from_json_file()
+                if json_history:
+                    self.history = json_history
+                    logger.info(f"JSON 파일에서 히스토리 {sum(len(items) for items in json_history.values())}개 항목 로드")
+                else:
+                    self.history = {}
+            else:
+                self.history = db_history
+                logger.info(f"MySQL에서 히스토리 {sum(len(items) for items in db_history.values())}개 항목 로드")
+
+            if not db_playlists:
+                logger.info("데이터베이스에 플레이리스트가 없습니다. JSON 파일에서 로드합니다.")
+                from utils.file_utils import load_playlists_from_json_file
+                json_playlists = load_playlists_from_json_file()
+                if json_playlists:
+                    self.playlists = json_playlists
+                    logger.info(f"JSON 파일에서 플레이리스트 로드")
+                else:
+                    self.playlists = {}
+            else:
+                self.playlists = db_playlists
+                logger.info("MySQL에서 플레이리스트 로드")
+
+        except Exception as e:
+            logger.error(f"MySQL 초기화 실패: {e}")
+            logger.warning("JSON 파일 사용 모드로 전환합니다.")
+            # MySQL 실패 시 JSON 파일에서 로드
+            from utils.file_utils import load_history_from_json_file, load_playlists_from_json_file
+            self.history = load_history_from_json_file()
+            self.playlists = load_playlists_from_json_file()
+
     async def cog_unload(self):
-        """Cog가 언로드될 때 Slash Commands 제거"""
+        """Cog가 언로드될 때 플레이어 정리, DB 종료 및 Slash Commands 제거"""
+        for guild_id in list(self.players):
+            try:
+                guild = self.bot.get_guild(guild_id)
+                if guild:
+                    await self.cleanup(guild)
+            except Exception as e:
+                logger.debug(f"cog_unload cleanup guild {guild_id} 중 오류 (무시됨): {e}")
+
+        if USE_MYSQL:
+            await close_db_pool()
+
         try:
             if self.music_group:
                 self.bot.tree.remove_command(self.music_group.name)

@@ -26,6 +26,7 @@ from utils.config import (
     LOCAL_AI_TEMPERATURE,
     LOCAL_AI_TIMEOUT_SECONDS,
 )
+from utils.discord_utils import safe_defer, safe_typing
 
 logger = logging.getLogger(__name__)
 
@@ -560,7 +561,7 @@ class ChatAI(commands.Cog):
     ) -> None:
         """세션 컨텍스트로 응답을 생성하고 채널에 전송한다."""
         try:
-            async with ctx.typing():
+            async with safe_typing(ctx):
                 reply = await self._generate_ai_reply(prompt, author_name, history=session.history)
         except Exception as e:
             logger.error(f"AI 응답 생성 오류: {e}", exc_info=True)
@@ -706,15 +707,18 @@ class ChatAI(commands.Cog):
     # ------------------------------------------------------------------ Slash Commands
     @discord.app_commands.describe(prompt="아리스에게 보낼 메시지 (생략하면 세션만 시작)")
     async def slash_ai_chat(self, interaction: discord.Interaction, prompt: Optional[str] = None):
+        await safe_defer(interaction)
         ctx = await self.bot.get_context(interaction)
         await self.ai_chat_command(ctx, prompt=prompt)
 
     @discord.app_commands.describe(prompt="아리스에게 보낼 메시지 (생략하면 음성 세션만 시작)")
     async def slash_ai_chat_tts(self, interaction: discord.Interaction, prompt: Optional[str] = None):
+        await safe_defer(interaction)
         ctx = await self.bot.get_context(interaction)
         await self.ai_chat_tts_command(ctx, prompt=prompt)
 
     async def slash_ai_chat_end(self, interaction: discord.Interaction):
+        await safe_defer(interaction)
         ctx = await self.bot.get_context(interaction)
         await self.ai_chat_end_command(ctx)
 

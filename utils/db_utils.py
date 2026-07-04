@@ -171,33 +171,39 @@ async def save_history_to_db(history: Dict[str, List[Dict[str, Any]]]):
     try:
         pool = await get_pool()
         async with pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                # 모든 히스토리를 삭제하고 재삽입 (간단한 구현)
-                # 더 나은 방법은 변경사항만 업데이트하는 것이지만, 현재는 전체 교체
-                for guild_id_str, items in history.items():
-                    guild_id = int(guild_id_str)
-                    
-                    # 기존 히스토리 삭제
-                    await cur.execute(
-                        "DELETE FROM music_history WHERE guild_id = %s",
-                        (guild_id,)
-                    )
-                    
-                    # 새 히스토리 삽입
-                    for item in items:
-                        played_at = datetime.strptime(item['played_at'], '%Y-%m-%d %H:%M:%S')
-                        await cur.execute("""
-                            INSERT INTO music_history (guild_id, title, url, duration, played_at)
-                            VALUES (%s, %s, %s, %s, %s)
-                        """, (
-                            guild_id,
-                            item['title'][:500],  # VARCHAR(500) 제한
-                            item['url'][:500],
-                            item['duration'],
-                            played_at
-                        ))
-                
+            # 삭제 후 재삽입 방식이므로 중간 실패 시 데이터 유실을 막기 위해 트랜잭션으로 묶는다.
+            await conn.begin()
+            try:
+                async with conn.cursor() as cur:
+                    # 모든 히스토리를 삭제하고 재삽입 (간단한 구현)
+                    # 더 나은 방법은 변경사항만 업데이트하는 것이지만, 현재는 전체 교체
+                    for guild_id_str, items in history.items():
+                        guild_id = int(guild_id_str)
+
+                        # 기존 히스토리 삭제
+                        await cur.execute(
+                            "DELETE FROM music_history WHERE guild_id = %s",
+                            (guild_id,)
+                        )
+
+                        # 새 히스토리 삽입
+                        for item in items:
+                            played_at = datetime.strptime(item['played_at'], '%Y-%m-%d %H:%M:%S')
+                            await cur.execute("""
+                                INSERT INTO music_history (guild_id, title, url, duration, played_at)
+                                VALUES (%s, %s, %s, %s, %s)
+                            """, (
+                                guild_id,
+                                item['title'][:500],  # VARCHAR(500) 제한
+                                item['url'][:500],
+                                item['duration'],
+                                played_at
+                            ))
+
                 await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
     except Exception as e:
         logger.error(f"히스토리 저장 중 오류: {e}")
 
@@ -318,38 +324,48 @@ async def load_playlists_from_db() -> Dict[str, Dict[str, List[str]]]:
 
 
 async def save_playlists_to_db(playlists: Dict[str, Dict[str, List[str]]]):
-    """플레이리스트를 데이터베이스에 저장합니다."""
+    """플레이리스트를 데이터베이스에 저장합니다.
+
+    주의: 플레이리스트는 코드상 사용자(user_id) 기준으로 관리되며,
+    과거 호환성 때문에 DB의 guild_id 컬럼에 user_id가 저장됩니다.
+    """
     if not USE_MYSQL:
         return
-    
+
     try:
         pool = await get_pool()
         async with pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                # 모든 플레이리스트를 삭제하고 재삽입
-                for guild_id_str, playlist_dict in playlists.items():
-                    guild_id = int(guild_id_str)
-                    
-                    # 기존 플레이리스트 삭제
-                    await cur.execute(
-                        "DELETE FROM playlists WHERE guild_id = %s",
-                        (guild_id,)
-                    )
-                    
-                    # 새 플레이리스트 삽입
-                    for playlist_id, urls in playlist_dict.items():
-                        for position, url in enumerate(urls):
-                            await cur.execute("""
-                                INSERT INTO playlists (guild_id, playlist_id, url, position)
-                                VALUES (%s, %s, %s, %s)
-                            """, (
-                                guild_id,
-                                playlist_id,
-                                url[:500],
-                                position
-                            ))
-                
+            # 삭제 후 재삽입 방식이므로 중간 실패 시 데이터 유실을 막기 위해 트랜잭션으로 묶는다.
+            await conn.begin()
+            try:
+                async with conn.cursor() as cur:
+                    # 모든 플레이리스트를 삭제하고 재삽입
+                    for guild_id_str, playlist_dict in playlists.items():
+                        guild_id = int(guild_id_str)
+
+                        # 기존 플레이리스트 삭제
+                        await cur.execute(
+                            "DELETE FROM playlists WHERE guild_id = %s",
+                            (guild_id,)
+                        )
+
+                        # 새 플레이리스트 삽입
+                        for playlist_id, urls in playlist_dict.items():
+                            for position, url in enumerate(urls):
+                                await cur.execute("""
+                                    INSERT INTO playlists (guild_id, playlist_id, url, position)
+                                    VALUES (%s, %s, %s, %s)
+                                """, (
+                                    guild_id,
+                                    playlist_id,
+                                    url[:500],
+                                    position
+                                ))
+
                 await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
     except Exception as e:
         logger.error(f"플레이리스트 저장 중 오류: {e}")
 
