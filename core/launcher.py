@@ -10,6 +10,7 @@ from cogs.music import Music
 from cogs.tts import TTS
 from cogs.chat_ai import ChatAI
 from GameSystem.YachtDiceGame import YachtDiceGame
+from GameSystem.BlackjackGame import BlackjackGame
 from utils.config import DISCORD_BOT_TOKEN, COMMAND_PREFIX
 from utils.db_utils import close_db_pool
 
@@ -29,6 +30,7 @@ async def load_cogs(bot: FuzzyBot):
     await bot.add_cog(TTS(bot))
     await bot.add_cog(ChatAI(bot))
     await bot.add_cog(YachtDiceGame(bot))
+    await bot.add_cog(BlackjackGame(bot))
 
 
 async def cleanup_bot(bot: FuzzyBot):

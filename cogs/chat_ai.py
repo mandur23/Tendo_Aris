@@ -106,6 +106,8 @@ class _ChatSession:
     use_tts: bool
     history: List[Dict[str, str]] = field(default_factory=list)
     last_active: float = field(default_factory=time.monotonic)
+    # 같은 세션의 응답 생성을 직렬화해 답변 순서·히스토리 순서를 보장한다.
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
     tts_lang: str = "ko"
     tts_voice_model: str = "기본"
@@ -170,17 +172,26 @@ class ChatAI(commands.Cog):
         if len(text) <= max_len:
             return [text]
 
+        # 줄바꿈 없는 초장문도 Discord 2000자 제한을 넘지 않도록 강제 분할한다.
+        pieces: List[str] = []
+        for line in text.splitlines(keepends=True):
+            while len(line) > max_len:
+                pieces.append(line[:max_len])
+                line = line[max_len:]
+            if line:
+                pieces.append(line)
+
         chunks: List[str] = []
         current: List[str] = []
         current_len = 0
-        for line in text.splitlines(keepends=True):
-            if current_len + len(line) > max_len and current:
+        for piece in pieces:
+            if current_len + len(piece) > max_len and current:
                 chunks.append("".join(current).strip())
-                current = [line]
-                current_len = len(line)
+                current = [piece]
+                current_len = len(piece)
             else:
-                current.append(line)
-                current_len += len(line)
+                current.append(piece)
+                current_len += len(piece)
 
         if current:
             chunks.append("".join(current).strip())
@@ -230,6 +241,9 @@ class ChatAI(commands.Cog):
                 raise FileNotFoundError(detail) from e
             raise RuntimeError(f"로컬 AI HTTP 오류({e.code}): {detail[:200]}") from e
         except error.URLError as e:
+            # 연결 단계에서 발생한 타임아웃은 URLError로 감싸져 온다.
+            if isinstance(getattr(e, "reason", None), TimeoutError):
+                raise RuntimeError("로컬 AI 응답 시간 초과가 발생했습니다.") from e
             raise RuntimeError("로컬 AI 서버에 연결할 수 없습니다. Ollama 실행 상태를 확인해주세요.") from e
         except TimeoutError as e:
             raise RuntimeError("로컬 AI 응답 시간 초과가 발생했습니다.") from e
@@ -330,12 +344,11 @@ class ChatAI(commands.Cog):
         username: str,
         history: Optional[List[Dict[str, str]]] = None,
     ) -> str:
-        if history:
-            messages = list(history) + [
-                {"role": "user", "content": f"({username}) {prompt}"}
-            ]
-        else:
-            messages = [{"role": "user", "content": f"사용자 이름: {username}\n질문: {prompt}"}]
+        # 히스토리에 저장되는 것과 동일한 "(이름) 내용" 형식을 항상 사용해
+        # 첫 메시지와 이후 컨텍스트의 형식이 어긋나지 않도록 한다.
+        messages = list(history or []) + [
+            {"role": "user", "content": f"({username}) {prompt}"}
+        ]
 
         try:
             return self._request_chat_korean(self.active_model, messages)
@@ -395,16 +408,21 @@ class ChatAI(commands.Cog):
             return {}
 
     def _build_session(self, *, use_tts: bool, tts_settings: Dict) -> _ChatSession:
-        return _ChatSession(
-            use_tts=use_tts,
-            tts_lang=tts_settings.get("lang", "ko"),
-            tts_voice_model=tts_settings.get("voice_model", "기본"),
-            tts_slow=tts_settings.get("slow", False),
-            tts_use_rvc=tts_settings.get("use_rvc", False),
-            tts_rvc_model=tts_settings.get("rvc_model", None),
-            tts_use_supertonic=tts_settings.get("use_supertonic", False),
-            tts_supertonic_voice=tts_settings.get("supertonic_voice", "default"),
-        )
+        session = _ChatSession(use_tts=use_tts)
+        self._apply_session_mode(session, use_tts=use_tts, tts_settings=tts_settings)
+        return session
+
+    @staticmethod
+    def _apply_session_mode(session: _ChatSession, *, use_tts: bool, tts_settings: Dict) -> None:
+        """세션의 모드(TTS 여부)와 TTS 설정 스냅샷만 갱신한다. 대화 히스토리는 유지."""
+        session.use_tts = use_tts
+        session.tts_lang = tts_settings.get("lang", "ko")
+        session.tts_voice_model = tts_settings.get("voice_model", "기본")
+        session.tts_slow = tts_settings.get("slow", False)
+        session.tts_use_rvc = tts_settings.get("use_rvc", False)
+        session.tts_rvc_model = tts_settings.get("rvc_model", None)
+        session.tts_use_supertonic = tts_settings.get("use_supertonic", False)
+        session.tts_supertonic_voice = tts_settings.get("supertonic_voice", "default")
 
     async def _end_session(self, key: SessionKey, channel: Optional[discord.abc.Messageable] = None, *, reason: str = "manual") -> bool:
         """세션을 종료한다. 종료가 실제로 일어났으면 True."""
@@ -527,20 +545,32 @@ class ChatAI(commands.Cog):
                 else:
                     tts_settings = self._snapshot_tts_settings(ctx)
 
-            session = self._build_session(use_tts=use_tts, tts_settings=tts_settings)
-            self._sessions[key] = session
-
             mode_label = "음성+텍스트" if use_tts else "텍스트"
-            intro = (
-                f"용사 아리스, 출진!\n"
-                f"선생님과의 모험을 시작합니다 ({mode_label} 모드).\n"
-                f"이제 이 채널에 보내시는 선생님의 메시지에 아리스가 계속 답해드릴게요.\n"
-                f"마칠 때는 `!대화 종료` 라고 말씀해 주세요!"
-            )
-            try:
-                await ctx.send(intro)
-            except discord.HTTPException:
-                pass
+            if session is None:
+                session = self._build_session(use_tts=use_tts, tts_settings=tts_settings)
+                self._sessions[key] = session
+
+                intro = (
+                    f"용사 아리스, 출진!\n"
+                    f"선생님과의 모험을 시작합니다 ({mode_label} 모드).\n"
+                    f"이제 이 채널에 보내시는 선생님의 메시지에 아리스가 계속 답해드릴게요.\n"
+                    f"마칠 때는 `!대화 종료` 라고 말씀해 주세요!"
+                )
+                try:
+                    await ctx.send(intro)
+                except discord.HTTPException:
+                    pass
+            elif session.use_tts != use_tts:
+                # 진행 중인 세션은 그대로 두고 모드만 바꿔 대화 히스토리를 보존한다.
+                self._apply_session_mode(session, use_tts=use_tts, tts_settings=tts_settings)
+                try:
+                    await ctx.send(
+                        f"(아리스: {mode_label} 모드로 전환했어요. "
+                        f"지금까지의 모험 일지는 그대로예요, 선생님.)",
+                        delete_after=12,
+                    )
+                except discord.HTTPException:
+                    pass
 
         session.touch()
 
@@ -548,38 +578,55 @@ class ChatAI(commands.Cog):
             await self.delete_command_message(ctx)
             return
 
-        await self._respond(ctx, session, prompt.strip(), author_name=ctx.author.display_name)
+        await self._respond(ctx, key, prompt.strip(), author_name=ctx.author.display_name)
         await self.delete_command_message(ctx)
 
     async def _respond(
         self,
         ctx,
-        session: _ChatSession,
+        key: SessionKey,
         prompt: str,
         *,
         author_name: str,
     ) -> None:
-        """세션 컨텍스트로 응답을 생성하고 채널에 전송한다."""
-        try:
-            async with safe_typing(ctx):
-                reply = await self._generate_ai_reply(prompt, author_name, history=session.history)
-        except Exception as e:
-            logger.error(f"AI 응답 생성 오류: {e}", exc_info=True)
-            try:
-                await ctx.send(
-                    f"선생님, 답변 생성 중 오류가 발생했어요: {str(e)[:100]}",
-                    delete_after=15,
-                )
-            except discord.HTTPException:
-                pass
+        """세션 컨텍스트로 응답을 생성하고 채널에 전송한다.
+
+        같은 세션의 요청은 락으로 직렬화해, 연속으로 보낸 메시지의 답변 순서와
+        히스토리 기록 순서가 뒤섞이지 않도록 한다.
+        """
+        session = self._sessions.get(key)
+        if session is None:
             return
 
-        # 호출 실패 시 컨텍스트가 오염되지 않도록 응답이 성공했을 때만 히스토리에 반영한다.
-        session.add_user(f"({author_name}) {prompt}")
-        session.add_assistant(reply)
-        session.touch()
+        async with session.lock:
+            # 락을 기다리는 동안 세션이 종료(또는 새로 시작)되었으면 응답하지 않는다.
+            if self._sessions.get(key) is not session:
+                return
 
-        await self._send_reply_with_optional_tts(ctx, reply, session=session)
+            try:
+                async with safe_typing(ctx):
+                    reply = await self._generate_ai_reply(prompt, author_name, history=session.history)
+            except Exception as e:
+                logger.error(f"AI 응답 생성 오류: {e}", exc_info=True)
+                try:
+                    await ctx.send(
+                        f"선생님, 답변 생성 중 오류가 발생했어요: {str(e)[:100]}",
+                        delete_after=15,
+                    )
+                except discord.HTTPException:
+                    pass
+                return
+
+            # 응답 생성 중 세션이 종료되었으면 뒤늦은 답변을 보내지 않는다.
+            if self._sessions.get(key) is not session:
+                return
+
+            # 호출 실패 시 컨텍스트가 오염되지 않도록 응답이 성공했을 때만 히스토리에 반영한다.
+            session.add_user(f"({author_name}) {prompt}")
+            session.add_assistant(reply)
+            session.touch()
+
+            await self._send_reply_with_optional_tts(ctx, reply, session=session)
 
     # ------------------------------------------------------------------ 일반 메시지 청취 (세션)
     @commands.Cog.listener()
@@ -611,8 +658,11 @@ class ChatAI(commands.Cog):
             await self._end_session(key, message.channel, reason="manual")
             return
 
+        # 응답 생성이 오래 걸려도 대화 중인 세션이 유휴 정리되지 않도록 수신 즉시 갱신한다.
+        session.touch()
+
         ctx = await self.bot.get_context(message)
-        await self._respond(ctx, session, message.content.strip(), author_name=message.author.display_name)
+        await self._respond(ctx, key, message.content.strip(), author_name=message.author.display_name)
 
     # ------------------------------------------------------------------ 유휴 세션 정리
     async def _idle_cleanup_loop(self) -> None:

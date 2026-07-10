@@ -1136,7 +1136,7 @@ class Music(commands.Cog):
         # 게임 명령어 확인
         game_commands = []
         for cmd in self.bot.commands:
-            if cmd.cog and cmd.cog.__class__.__name__ == "YachtDiceGame":
+            if cmd.cog and cmd.cog.__class__.__name__ in ("YachtDiceGame", "BlackjackGame"):
                 game_commands.append(cmd.name)
         if game_commands:
             categories["게임"] = game_commands
