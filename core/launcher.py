@@ -6,6 +6,7 @@ import discord
 from core.bot import FuzzyBot
 from core.shutdown_handler import get_shutdown_event
 from core.watchdog import connection_watchdog
+from core.web_admin import WebAdmin
 from cogs.music import Music
 from cogs.tts import TTS
 from cogs.chat_ai import ChatAI
@@ -35,6 +36,14 @@ async def load_cogs(bot: FuzzyBot):
 
 async def cleanup_bot(bot: FuzzyBot):
     """봇 종료 시 정리 작업을 수행합니다."""
+    # 웹 관리자 대시보드 종료
+    web_admin = getattr(bot, 'web_admin', None)
+    if web_admin:
+        try:
+            await web_admin.stop()
+        except Exception as e:
+            logger.debug(f"웹 관리자 대시보드 종료 중 오류 (무시됨): {e}")
+
     # DB 연결 풀 정리 (봇 종료 전)
     try:
         # bot.get_cog()를 사용하여 이미 로드된 Music Cog 가져오기
@@ -67,7 +76,11 @@ async def run_bot(bot: FuzzyBot):
     try:
         async with bot:
             await load_cogs(bot)
-            
+
+            # 웹 관리자 대시보드 시작 (WEB_ADMIN_PASSWORD 설정 시)
+            bot.web_admin = WebAdmin(bot)
+            await bot.web_admin.start()
+
             # 봇 시작과 종료 이벤트 대기를 병렬로 처리
             bot_task = asyncio.create_task(bot.start(DISCORD_BOT_TOKEN))
             shutdown_task = asyncio.create_task(shutdown_event.wait())

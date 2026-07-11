@@ -71,6 +71,35 @@ except (TypeError, ValueError):
 # 온도 범위 보정
 LOCAL_AI_TEMPERATURE = max(0.0, min(2.0, LOCAL_AI_TEMPERATURE))
 
+try:
+    LOCAL_AI_NUM_CTX = int(os.getenv('LOCAL_AI_NUM_CTX', '8192'))
+except (TypeError, ValueError):
+    LOCAL_AI_NUM_CTX = 8192
+    if os.getenv('LOCAL_AI_NUM_CTX') is not None:
+        logger.warning("LOCAL_AI_NUM_CTX가 숫자가 아니에요. 8192를 사용할게요.")
+
+try:
+    LOCAL_AI_NUM_PREDICT = int(os.getenv('LOCAL_AI_NUM_PREDICT', '512'))
+except (TypeError, ValueError):
+    LOCAL_AI_NUM_PREDICT = 512
+    if os.getenv('LOCAL_AI_NUM_PREDICT') is not None:
+        logger.warning("LOCAL_AI_NUM_PREDICT가 숫자가 아니에요. 512를 사용할게요.")
+
+# 모델을 메모리에 유지할 시간 (유휴 후 첫 응답 지연 방지). 예: '30m', '1h', '-1'(무제한)
+LOCAL_AI_KEEP_ALIVE = os.getenv('LOCAL_AI_KEEP_ALIVE', '30m').strip() or '30m'
+
+# 웹 관리자 대시보드 설정
+# 보안상 기본값은 로컬(127.0.0.1) 전용이며, WEB_ADMIN_PASSWORD가 비어 있으면 시작하지 않는다.
+WEB_ADMIN_ENABLED = os.getenv('WEB_ADMIN_ENABLED', 'true').strip().lower() in ('1', 'true', 'yes', 'on')
+WEB_ADMIN_HOST = os.getenv('WEB_ADMIN_HOST', '127.0.0.1').strip() or '127.0.0.1'
+try:
+    WEB_ADMIN_PORT = int(os.getenv('WEB_ADMIN_PORT', '8899'))
+except (TypeError, ValueError):
+    WEB_ADMIN_PORT = 8899
+    if os.getenv('WEB_ADMIN_PORT') is not None:
+        logger.warning("WEB_ADMIN_PORT가 숫자가 아니에요. 8899를 사용할게요.")
+WEB_ADMIN_PASSWORD = os.getenv('WEB_ADMIN_PASSWORD', '').strip()
+
 # 음악 플레이어 설정
 DEFAULT_VOLUME = 0.2
 IDLE_TIMEOUT = 300  # 초

@@ -21,8 +21,11 @@ from discord.ext import commands
 from utils.config import (
     COMMAND_MESSAGE_DELETE_DELAY,
     LOCAL_AI_BASE_URL,
+    LOCAL_AI_KEEP_ALIVE,
     LOCAL_AI_MAX_PROMPT_CHARS,
     LOCAL_AI_MODEL,
+    LOCAL_AI_NUM_CTX,
+    LOCAL_AI_NUM_PREDICT,
     LOCAL_AI_TEMPERATURE,
     LOCAL_AI_TIMEOUT_SECONDS,
 )
@@ -86,9 +89,24 @@ _URL_OR_CODE_RE = re.compile(
 )
 
 SESSION_IDLE_TIMEOUT = 600           # 초. 이 시간 동안 메시지 없으면 세션 자동 종료.
-SESSION_HISTORY_MAX_TURNS = 6        # user/assistant 메시지를 각각 최대 N 개까지 컨텍스트로 유지.
+SESSION_HISTORY_MAX_TURNS = 6        # 요약 압축 후 유지할 최근 user/assistant 메시지 쌍 수.
+SESSION_SUMMARY_MAX_CHARS = 700      # 굴러가는 요약(rolling summary) 길이 상한.
+# 히스토리가 이 개수를 넘으면 오래된 부분을 요약으로 압축한다.
+# (매 턴 요약하지 않도록 여유분 6개를 두어 약 3턴마다 한 번씩만 요약 호출)
+SESSION_COMPACT_TRIGGER = SESSION_HISTORY_MAX_TURNS * 2 + 6
+# 요약이 계속 실패해도 히스토리가 무한히 커지지 않도록 하는 안전 상한.
+SESSION_HISTORY_HARD_CAP = SESSION_HISTORY_MAX_TURNS * 2 * 3
 TTS_MAX_CHARS = 200                  # 답변이 길어도 음성 합성은 앞부분만 (지연·비용 방지).
 _EXIT_KEYWORDS = {"종료", "끝", "그만", "stop", "exit", "off", "quit", "bye"}
+
+# 오래된 대화를 압축할 때 쓰는 요약 전용 시스템 프롬프트 (페르소나와 무관).
+SUMMARY_SYSTEM_PROMPT = (
+    "당신은 대화 기록 요약 도우미입니다. 주어지는 '기존 요약'과 '새 대화'를 통합해 "
+    "한국어로 간결한 최신 요약을 만드세요.\n"
+    "- 사용자에 대한 사실(이름, 취향, 상황), 진행 중인 주제, 약속이나 요청, 중요한 결정을 우선 보존합니다.\n"
+    f"- {SESSION_SUMMARY_MAX_CHARS}자 이내로 작성합니다. '- ' 목록 형식을 사용해도 됩니다.\n"
+    "- 요약 본문만 출력하고 다른 말은 덧붙이지 않습니다."
+)
 
 
 # (guild_id_or_0, channel_id, user_id)
@@ -105,6 +123,8 @@ class _ChatSession:
 
     use_tts: bool
     history: List[Dict[str, str]] = field(default_factory=list)
+    # 히스토리에서 밀려난 오래된 대화의 굴러가는 요약. 시스템 컨텍스트로 계속 주입된다.
+    summary: str = ""
     last_active: float = field(default_factory=time.monotonic)
     # 같은 세션의 응답 생성을 직렬화해 답변 순서·히스토리 순서를 보장한다.
     lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
@@ -129,9 +149,10 @@ class _ChatSession:
         self._truncate()
 
     def _truncate(self) -> None:
-        max_msgs = SESSION_HISTORY_MAX_TURNS * 2
-        if len(self.history) > max_msgs:
-            self.history = self.history[-max_msgs:]
+        # 오래된 대화의 요약 압축은 ChatAI._maybe_compact_history 가 담당한다.
+        # 여기서는 요약이 계속 실패하는 경우를 대비한 안전 상한만 적용해 무한 증가를 막는다.
+        if len(self.history) > SESSION_HISTORY_HARD_CAP:
+            self.history = self.history[-SESSION_HISTORY_HARD_CAP:]
 
 
 class ChatAI(commands.Cog):
@@ -299,8 +320,14 @@ class ChatAI(commands.Cog):
             "model": model_name,
             "messages": [{"role": "system", "content": system_content}] + list(messages),
             "stream": False,
+            # 유휴 후 모델이 메모리에서 내려가 첫 응답이 느려지는 것을 방지
+            "keep_alive": LOCAL_AI_KEEP_ALIVE,
             "options": {
                 "temperature": LOCAL_AI_TEMPERATURE,
+                # 기본 4096으로는 시스템 프롬프트+히스토리가 잘릴 수 있어 확장
+                "num_ctx": LOCAL_AI_NUM_CTX,
+                # 폭주 방지: 페르소나 특성상 짧은 답변이므로 생성 길이 상한 설정
+                "num_predict": LOCAL_AI_NUM_PREDICT,
             },
         }
         parsed = self._post_json_sync(endpoint, payload)
@@ -310,9 +337,14 @@ class ChatAI(commands.Cog):
             raise RuntimeError("로컬 AI가 빈 응답을 반환했습니다.")
         return output_text
 
-    def _request_chat_korean(self, model_name: str, messages: List[Dict[str, str]]) -> str:
+    def _request_chat_korean(
+        self,
+        model_name: str,
+        messages: List[Dict[str, str]],
+        extra_system: str = "",
+    ) -> str:
         """한국어 전용 응답 보장: 비-한국어 외래 문자 발견 시 1회 재시도 후 silent cleanup."""
-        reply = self._request_chat_once(model_name, messages)
+        reply = self._request_chat_once(model_name, messages, extra_system=extra_system)
         if not self._contains_non_korean(reply):
             return reply
 
@@ -327,7 +359,8 @@ class ChatAI(commands.Cog):
             "외국어 단어를 그대로 끼워 넣지 말고 의미를 우리말로 옮겨 적으세요. "
             "한 글자라도 비-한국어 외래 문자가 들어가면 안 됩니다."
         )
-        retried = self._request_chat_once(model_name, messages, extra_system=retry_directive)
+        combined_system = f"{extra_system}\n\n{retry_directive}" if extra_system else retry_directive
+        retried = self._request_chat_once(model_name, messages, extra_system=combined_system)
         if not self._contains_non_korean(retried):
             return retried
 
@@ -343,6 +376,7 @@ class ChatAI(commands.Cog):
         prompt: str,
         username: str,
         history: Optional[List[Dict[str, str]]] = None,
+        summary: str = "",
     ) -> str:
         # 히스토리에 저장되는 것과 동일한 "(이름) 내용" 형식을 항상 사용해
         # 첫 메시지와 이후 컨텍스트의 형식이 어긋나지 않도록 한다.
@@ -350,8 +384,17 @@ class ChatAI(commands.Cog):
             {"role": "user", "content": f"({username}) {prompt}"}
         ]
 
+        extra_system = ""
+        if summary:
+            extra_system = (
+                "[지난 대화 요약]\n"
+                f"{summary}\n"
+                "위 요약은 이 대화에서 히스토리에 없는 이전 내용의 기억입니다. "
+                "필요할 때 자연스럽게 참고하되, 요약문을 그대로 인용하지 마세요."
+            )
+
         try:
-            return self._request_chat_korean(self.active_model, messages)
+            return self._request_chat_korean(self.active_model, messages, extra_system=extra_system)
         except FileNotFoundError:
             installed_models = self._fetch_installed_models_sync()
             fallback_model = self._pick_fallback_model(installed_models, self.active_model)
@@ -366,13 +409,14 @@ class ChatAI(commands.Cog):
                 f"설정 모델 `{old_model}`을 찾지 못해서, 설치된 모델 `{fallback_model}`로 자동 전환했어요."
             )
             logger.warning(f"로컬 AI 모델 자동 전환: {old_model} -> {fallback_model}")
-            return self._request_chat_korean(self.active_model, messages)
+            return self._request_chat_korean(self.active_model, messages, extra_system=extra_system)
 
     async def _generate_ai_reply(
         self,
         prompt: str,
         username: str,
         history: Optional[List[Dict[str, str]]] = None,
+        summary: str = "",
     ) -> str:
         if not self._is_ai_available():
             raise ValueError("로컬 AI 설정이 비어 있습니다.")
@@ -382,7 +426,67 @@ class ChatAI(commands.Cog):
             raise ValueError("질문 내용이 비어있습니다.")
 
         return await asyncio.to_thread(
-            self._call_local_ai_sync, prepared_prompt, username, history
+            self._call_local_ai_sync, prepared_prompt, username, history, summary
+        )
+
+    # ------------------------------------------------------------------ 대화 요약 (장기 기억)
+    def _summarize_sync(self, old_summary: str, messages: List[Dict[str, str]]) -> str:
+        """기존 요약과 히스토리에서 밀려나는 오래된 메시지들을 통합한 최신 요약을 생성한다."""
+        lines = []
+        for m in messages:
+            role = "사용자" if m.get("role") == "user" else "아리스"
+            lines.append(f"{role}: {m.get('content', '')}")
+        user_content = (
+            f"[기존 요약]\n{old_summary or '(없음)'}\n\n"
+            f"[새 대화]\n" + "\n".join(lines) + "\n\n"
+            "위 내용을 통합한 최신 요약을 작성하세요."
+        )
+
+        endpoint = f"{LOCAL_AI_BASE_URL.rstrip('/')}/api/chat"
+        payload = {
+            "model": self.active_model,
+            "messages": [
+                {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+            "stream": False,
+            "keep_alive": LOCAL_AI_KEEP_ALIVE,
+            "options": {
+                "temperature": 0.3,  # 요약은 사실 보존이 중요하므로 낮은 온도
+                "num_ctx": LOCAL_AI_NUM_CTX,
+                "num_predict": 400,
+            },
+        }
+        parsed = self._post_json_sync(endpoint, payload)
+        text = (parsed.get("message", {}).get("content") or "").strip()
+        if not text:
+            raise RuntimeError("요약 응답이 비어 있습니다.")
+        # 모델이 길이 지시를 무시할 경우를 대비한 하드 상한
+        return text[:SESSION_SUMMARY_MAX_CHARS * 2]
+
+    async def _maybe_compact_history(self, session: _ChatSession) -> None:
+        """히스토리가 임계치를 넘으면 오래된 부분을 요약으로 압축한다.
+
+        답변 전송 후(세션 락 보유 상태)에 호출되므로 사용자 응답 지연에는 영향이 없고,
+        요약 실패 시에는 _truncate 의 안전 상한이 무한 증가를 막는다.
+        """
+        if len(session.history) <= SESSION_COMPACT_TRIGGER:
+            return
+
+        keep_msgs = SESSION_HISTORY_MAX_TURNS * 2
+        overflow = session.history[:-keep_msgs]
+        try:
+            new_summary = await asyncio.to_thread(
+                self._summarize_sync, session.summary, overflow
+            )
+        except Exception as e:
+            logger.warning(f"대화 요약 생성 실패(다음 기회에 재시도): {e}")
+            return
+
+        session.summary = new_summary
+        session.history = session.history[-keep_msgs:]
+        logger.debug(
+            f"대화 히스토리 압축: {len(overflow)}개 메시지 -> 요약 {len(new_summary)}자"
         )
 
     # ------------------------------------------------------------------ 세션 관리
@@ -605,7 +709,10 @@ class ChatAI(commands.Cog):
 
             try:
                 async with safe_typing(ctx):
-                    reply = await self._generate_ai_reply(prompt, author_name, history=session.history)
+                    reply = await self._generate_ai_reply(
+                        prompt, author_name,
+                        history=session.history, summary=session.summary,
+                    )
             except Exception as e:
                 logger.error(f"AI 응답 생성 오류: {e}", exc_info=True)
                 try:
@@ -627,6 +734,9 @@ class ChatAI(commands.Cog):
             session.touch()
 
             await self._send_reply_with_optional_tts(ctx, reply, session=session)
+
+            # 답변 전송을 마친 뒤 히스토리가 길면 오래된 부분을 요약으로 압축한다 (장기 기억).
+            await self._maybe_compact_history(session)
 
     # ------------------------------------------------------------------ 일반 메시지 청취 (세션)
     @commands.Cog.listener()
