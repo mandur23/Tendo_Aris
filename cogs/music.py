@@ -1133,13 +1133,18 @@ class Music(commands.Cog):
             "관리": ["삭제", "재시작", "종료봇"]
         }
         
-        # 게임 명령어 확인
+        # 게임/TRPG 명령어 확인
         game_commands = []
+        trpg_commands = []
         for cmd in self.bot.commands:
             if cmd.cog and cmd.cog.__class__.__name__ in ("YachtDiceGame", "BlackjackGame"):
                 game_commands.append(cmd.name)
+            elif cmd.cog and cmd.cog.__class__.__name__ == "TRPG":
+                trpg_commands.append(cmd.name)
         if game_commands:
             categories["게임"] = game_commands
+        if trpg_commands:
+            categories["TRPG"] = sorted(trpg_commands)
         
         # 현재 페이지 (기본: 음악)
         current_page = "음악"
@@ -1179,9 +1184,9 @@ class Music(commands.Cog):
                 self.current_page = "음악"
                 self.message = None
                 
-                # 카테고리 버튼 추가
+                # 카테고리 버튼 추가 (Discord 제한: 5줄 x 5개 = 최대 25개)
                 for i, cat in enumerate(categories.keys()):
-                    if i < 5:  # Discord 버튼 최대 5개 제한
+                    if i < 25:
                         btn = discord.ui.Button(
                             label=cat,
                             style=discord.ButtonStyle.primary if cat == self.current_page else discord.ButtonStyle.secondary,

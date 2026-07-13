@@ -1,4 +1,3 @@
-"""봇 메인 진입점."""
 import asyncio
 import os
 import sys

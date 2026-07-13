@@ -14,6 +14,7 @@ DATA_DIR.mkdir(exist_ok=True)
 HISTORY_FILE = str(DATA_DIR / 'history.json')
 PLAYLISTS_FILE = str(DATA_DIR / 'playlists.json')
 TTS_SETTINGS_FILE = str(DATA_DIR / 'tts_settings.json')
+TRPG_SAVES_FILE = str(DATA_DIR / 'trpg_saves.json')
 LOGS_DIR = Path('logs')
 
 
@@ -164,6 +165,37 @@ def save_tts_settings(tts_settings):
         atomic_write_json(TTS_SETTINGS_FILE, tts_settings)
     except Exception as e:
         logger.error(f"TTS 설정을 저장하는 중 오류가 발생했습니다: {e}")
+
+
+def load_trpg_saves():
+    """TRPG 세이브 데이터를 파일에서 로드합니다."""
+    try:
+        with open(TRPG_SAVES_FILE, 'r', encoding='utf-8') as f:
+            content = f.read()
+            if not content:
+                return {}
+            return json.loads(content)
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError as e:
+        logger.warning(f"TRPG 세이브 파일이 손상되었습니다. 새로운 세이브를 시작합니다: {e}")
+        # 백업 시도
+        backup_path = f"{TRPG_SAVES_FILE}.backup"
+        if os.path.exists(TRPG_SAVES_FILE):
+            try:
+                os.rename(TRPG_SAVES_FILE, backup_path)
+                logger.info(f"손상된 파일을 {backup_path}로 백업했습니다.")
+            except OSError:
+                pass
+        return {}
+
+
+def save_trpg_saves(saves):
+    """TRPG 세이브 데이터를 파일에 원자적으로 저장합니다."""
+    try:
+        atomic_write_json(TRPG_SAVES_FILE, saves)
+    except Exception as e:
+        logger.error(f"TRPG 세이브를 저장하는 중 오류가 발생했습니다: {e}")
 
 
 def ensure_logs_dir():
