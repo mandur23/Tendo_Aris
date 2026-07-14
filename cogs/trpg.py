@@ -26,7 +26,9 @@ from GameSystem.TRPGEngine import (
     generate_scenario,
     play_turn,
     roll_check,
+    roll_dice,
 )
+from cogs.trpg_ui import CharacterSetupModal, combat_status_lines
 from utils.config import LOCAL_AI_MODEL
 from utils.discord_utils import AuthorLockedView, safe_defer, safe_edit_message
 from utils.file_utils import load_trpg_saves, save_trpg_saves
@@ -85,8 +87,14 @@ class ClassSelectView(AuthorLockedView):
             self.add_item(btn)
 
     async def _class_cb(self, interaction: discord.Interaction, class_key: str):
-        self.stop()
-        await self.cog.start_adventure(interaction, self.key, self.genre_key, class_key)
+        async def _submit(modal_itx: discord.Interaction, name: str, race: str, background: str):
+            self.stop()
+            character = TRPGCharacter.create(name, class_key, race=race, background=background)
+            await self.cog.start_adventure(modal_itx, self.key, self.genre_key, character)
+
+        await interaction.response.send_modal(
+            CharacterSetupModal(default_name=interaction.user.display_name, on_submit_cb=_submit)
+        )
 
 
 class FreeActionModal(discord.ui.Modal, title="✍️ 자유 행동"):
@@ -157,6 +165,7 @@ class AdventureView(AuthorLockedView):
         await self.cog.process_action(
             interaction, self.key, choice["text"],
             stat=choice.get("stat"), dc=choice.get("dc", DEFAULT_DC), fate_roll=False, view=self,
+            choice=choice,
         )
 
     async def _free_cb(self, interaction: discord.Interaction):
@@ -282,10 +291,15 @@ class TRPG(commands.Cog):
             if changes:
                 embed.add_field(name="📦 변화", value="\n".join(changes)[:1024], inline=False)
 
+        if adv.combat is not None:
+            embed.add_field(name="⚔️ 전투 중!", value=combat_status_lines(adv.combat)[:1024], inline=False)
+
         embed.add_field(name=char.summary_line(), value=_hp_bar(char.hp, char.max_hp), inline=False)
 
         footer = "버튼으로 행동을 고르거나 ✍️ 자유 행동으로 직접 입력하세요."
-        if not opening and adv.quest:
+        if adv.combat is not None:
+            footer = "⚔️ 전투 중! 공격/방어 버튼이나 ✍️ 자유 행동(물약·도주·꾀)으로 싸우세요."
+        elif not opening and adv.quest:
             footer = f"🎯 {adv.quest[:140]}\n{footer}"
         embed.set_footer(text=footer[:2048])
         return embed
@@ -297,7 +311,11 @@ class TRPG(commands.Cog):
             color=0x3498DB,
         )
         embed.add_field(name="HP", value=_hp_bar(char.hp, char.max_hp), inline=False)
+        if char.race:
+            embed.add_field(name="종족", value=char.race, inline=True)
         embed.add_field(name="능력치", value=char.stats_line(), inline=False)
+        if char.background:
+            embed.add_field(name="배경", value=char.background[:1024], inline=False)
         inventory = "\n".join(f"- {item}" for item in char.inventory) if char.inventory else "비어 있음"
         embed.add_field(name="소지품", value=inventory[:1024], inline=False)
         embed.add_field(
@@ -359,7 +377,7 @@ class TRPG(commands.Cog):
         genre = GENRES[genre_key]
         embed = discord.Embed(
             title=f"{genre['emoji']} {genre['label']} 모험 — 직업 선택",
-            description=f"{genre['hint']}.\n\n주인공의 직업을 선택하세요!",
+            description=f"{genre['hint']}.\n\n주인공의 직업을 선택하세요! 직업을 고르면 이름·종족·배경을 입력할 수 있어요.",
             color=0x9B59B6,
         )
         for spec in CLASSES.values():
@@ -376,7 +394,7 @@ class TRPG(commands.Cog):
         except discord.HTTPException:
             logger.exception("직업 선택 화면 표시 실패")
 
-    async def start_adventure(self, interaction: discord.Interaction, key: SessionKey, genre_key: str, class_key: str):
+    async def start_adventure(self, interaction: discord.Interaction, key: SessionKey, genre_key: str, character: TRPGCharacter):
         lock = self._lock(key)
         if lock.locked():
             await self.respond_ephemeral(interaction, "이미 모험 생성이 진행 중이에요. 잠시만요!")
@@ -402,7 +420,6 @@ class TRPG(commands.Cog):
             if existing is not None and existing.is_playing:
                 return
 
-            character = TRPGCharacter.create(interaction.user.display_name, class_key)
             try:
                 async with interaction.channel.typing():
                     adv = await asyncio.to_thread(
@@ -462,6 +479,7 @@ class TRPG(commands.Cog):
         dc: int,
         fate_roll: bool,
         view: AdventureView,
+        choice: Optional[dict] = None,
     ):
         adv = self.adventures.get(key)
         if adv is None or not adv.is_playing:
@@ -500,7 +518,9 @@ class TRPG(commands.Cog):
             view.stop()
 
             channel = interaction.channel
-            check = roll_check(adv.character, stat, dc) if (stat or fate_roll) else None
+            # 전투 중 지정 행동(공격/방어)은 코드가 명중·피해를 굴리므로 별도 d20 판정을 하지 않는다.
+            in_combat_action = adv.combat is not None and (choice or {}).get("combat") in ("attack", "defend")
+            check = roll_check(adv.character, stat, dc) if (stat or fate_roll) and not in_combat_action else None
 
             header = f"🕹️ **{adv.character.name}**: {action_text}"
             if check:
@@ -513,7 +533,7 @@ class TRPG(commands.Cog):
             try:
                 async with channel.typing():
                     result = await asyncio.to_thread(
-                        play_turn, adv, action_text, check, model=self._model()
+                        play_turn, adv, action_text, check, choice=choice, model=self._model()
                     )
             except Exception as e:
                 logger.error(f"TRPG 턴 처리 실패: {e}", exc_info=True)
@@ -527,6 +547,12 @@ class TRPG(commands.Cog):
                 return
 
             await self._autosave(key, adv)
+
+            if result.combat_log:
+                try:
+                    await channel.send("\n".join(result.combat_log))
+                except discord.HTTPException:
+                    logger.debug("전투 로그 전송 실패 (무시됨)")
 
             if not adv.is_playing:
                 try:
@@ -673,6 +699,15 @@ class TRPG(commands.Cog):
             return
         await ctx.send(embed=self.character_embed(adv), delete_after=60)
 
+    @commands.command(name="주사위", aliases=["roll", "굴림"], help="TRPG 주사위를 굴립니다. 예: !주사위 2d6+3 (기본 d20)")
+    async def dice_command(self, ctx, *, notation: str = "d20"):
+        try:
+            roll = roll_dice(notation)
+        except ValueError as e:
+            await ctx.send(f"⚠️ {e}", delete_after=10)
+            return
+        await ctx.send(f"**{ctx.author.display_name}** 님의 굴림 — {roll.display}")
+
     @commands.command(name="모험종료", aliases=["trpg종료"], help="진행 중인 TRPG 모험을 종료하고 세이브를 삭제합니다.")
     async def trpg_end(self, ctx):
         key = self._make_key(ctx.guild, ctx.channel, ctx.author)
@@ -709,6 +744,14 @@ class TRPG(commands.Cog):
         ctx = await self.bot.get_context(interaction)
         await self.trpg_end(ctx)
 
+    async def slash_dice(self, interaction: discord.Interaction, 표기: str = "d20"):
+        try:
+            roll = roll_dice(표기)
+        except ValueError as e:
+            await interaction.response.send_message(f"⚠️ {e}", ephemeral=True)
+            return
+        await interaction.response.send_message(f"**{interaction.user.display_name}** 님의 굴림 — {roll.display}")
+
     # ------------------------------------------------------------------ Cog 라이프사이클
     async def cog_load(self):
         self.trpg_group = discord.app_commands.Group(name="모험", description="AI 생성형 TRPG 명령어")
@@ -716,6 +759,7 @@ class TRPG(commands.Cog):
         self.trpg_group.command(name="계속", description="저장된 모험을 이어서 진행합니다")(self.slash_trpg_continue)
         self.trpg_group.command(name="상태", description="캐릭터 상태를 확인합니다")(self.slash_trpg_status)
         self.trpg_group.command(name="종료", description="모험을 종료하고 세이브를 삭제합니다")(self.slash_trpg_end)
+        self.trpg_group.command(name="주사위", description="TRPG 주사위를 굴립니다 (예: 2d6+3, 기본 d20)")(self.slash_dice)
         self.bot.tree.add_command(self.trpg_group, override=True)
 
     async def cog_unload(self):

@@ -16,6 +16,7 @@ PLAYLISTS_FILE = str(DATA_DIR / 'playlists.json')
 TTS_SETTINGS_FILE = str(DATA_DIR / 'tts_settings.json')
 TRPG_SAVES_FILE = str(DATA_DIR / 'trpg_saves.json')
 TRPG_PARTY_SAVES_FILE = str(DATA_DIR / 'trpg_party_saves.json')
+TRPG_WORLD_SAVES_FILE = str(DATA_DIR / 'trpg_world_saves.json')
 LOGS_DIR = Path('logs')
 
 
@@ -228,6 +229,37 @@ def save_trpg_party_saves(saves):
         atomic_write_json(TRPG_PARTY_SAVES_FILE, saves)
     except Exception as e:
         logger.error(f"파티 TRPG 세이브를 저장하는 중 오류가 발생했습니다: {e}")
+
+
+def load_trpg_world_saves():
+    """자유 모험(공유 세계) 세이브 데이터를 파일에서 로드합니다."""
+    try:
+        with open(TRPG_WORLD_SAVES_FILE, 'r', encoding='utf-8') as f:
+            content = f.read()
+            if not content:
+                return {}
+            return json.loads(content)
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError as e:
+        logger.warning(f"자유 모험 세이브 파일이 손상되었습니다. 새로운 세이브를 시작합니다: {e}")
+        # 백업 시도
+        backup_path = f"{TRPG_WORLD_SAVES_FILE}.backup"
+        if os.path.exists(TRPG_WORLD_SAVES_FILE):
+            try:
+                os.rename(TRPG_WORLD_SAVES_FILE, backup_path)
+                logger.info(f"손상된 파일을 {backup_path}로 백업했습니다.")
+            except OSError:
+                pass
+        return {}
+
+
+def save_trpg_world_saves(saves):
+    """자유 모험(공유 세계) 세이브 데이터를 파일에 원자적으로 저장합니다."""
+    try:
+        atomic_write_json(TRPG_WORLD_SAVES_FILE, saves)
+    except Exception as e:
+        logger.error(f"자유 모험 세이브를 저장하는 중 오류가 발생했습니다: {e}")
 
 
 def ensure_logs_dir():

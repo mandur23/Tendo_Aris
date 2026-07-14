@@ -33,6 +33,7 @@ from GameSystem.TRPGEngine import (
     play_party_turn,
     roll_check,
 )
+from cogs.trpg_ui import CharacterSetupModal, combat_status_lines
 from utils.config import LOCAL_AI_MODEL
 from utils.discord_utils import AuthorLockedView, safe_defer, safe_edit_message
 from utils.file_utils import load_trpg_party_saves, save_trpg_party_saves
@@ -61,8 +62,12 @@ class PartyLobby:
     genre_key: str
     members: Dict[int, str] = field(default_factory=dict)   # user_id -> class_key (참가 순서 유지)
     names: Dict[int, str] = field(default_factory=dict)     # user_id -> 표시 이름
+    profiles: Dict[int, dict] = field(default_factory=dict) # user_id -> {name, race, background}
     message: Optional[discord.Message] = None
     view: Optional["PartyLobbyView"] = None
+
+    def display_name(self, user_id: int) -> str:
+        return self.profiles.get(user_id, {}).get("name") or self.names.get(user_id, "?")
 
 
 class PartyGenreSelectView(AuthorLockedView):
@@ -124,9 +129,23 @@ class PartyLobbyView(discord.ui.View):
         if user.id not in self.lobby.members and len(self.lobby.members) >= PARTY_MAX_MEMBERS:
             await self.cog.respond_ephemeral(interaction, f"파티가 가득 찼어요! (최대 {PARTY_MAX_MEMBERS}명)")
             return
-        self.lobby.members[user.id] = class_key
-        self.lobby.names[user.id] = user.display_name
-        await self.cog.update_lobby_message(interaction, self.key)
+
+        lobby = self.lobby
+        prev_name = lobby.profiles.get(user.id, {}).get("name") or user.display_name
+
+        async def _submit(modal_itx: discord.Interaction, name: str, race: str, background: str):
+            # 모달 입력 중에 다른 사람이 자리를 채웠을 수 있으므로 다시 확인.
+            if user.id not in lobby.members and len(lobby.members) >= PARTY_MAX_MEMBERS:
+                await self.cog.respond_ephemeral(modal_itx, f"파티가 가득 찼어요! (최대 {PARTY_MAX_MEMBERS}명)")
+                return
+            lobby.members[user.id] = class_key
+            lobby.names[user.id] = user.display_name
+            lobby.profiles[user.id] = {"name": name, "race": race, "background": background}
+            await self.cog.update_lobby_message(modal_itx, self.key)
+
+        await interaction.response.send_modal(
+            CharacterSetupModal(default_name=prev_name, on_submit_cb=_submit)
+        )
 
     async def _leave_cb(self, interaction: discord.Interaction):
         if interaction.user.id not in self.lobby.members:
@@ -251,6 +270,7 @@ class PartyAdventureView(discord.ui.View):
         await self.cog.process_party_action(
             interaction, self.key, choice["text"],
             stat=choice.get("stat"), dc=choice.get("dc", DEFAULT_DC), fate_roll=False, view=self,
+            choice=choice,
         )
 
     async def _free_cb(self, interaction: discord.Interaction):
@@ -373,7 +393,7 @@ class TRPGParty(commands.Cog):
             title=f"{genre['emoji']} {genre['label']} 파티 모험 — 참가자 모집",
             description=(
                 f"{genre['hint']}.\n\n"
-                "아래 직업 버튼을 눌러 파티에 참가하세요! (다시 누르면 직업 변경)\n"
+                "아래 직업 버튼을 누르면 이름·종족·배경을 입력하고 참가해요! (다시 누르면 변경)\n"
                 f"최대 {PARTY_MAX_MEMBERS}명 · 참가 순서대로 턴이 돌아갑니다.\n"
                 "모두 모이면 **호스트가 🚀 시작** 버튼으로 모험을 시작합니다."
             ),
@@ -384,7 +404,9 @@ class TRPGParty(commands.Cog):
             for idx, (user_id, class_key) in enumerate(lobby.members.items(), 1):
                 spec = CLASSES[class_key]
                 host_mark = " 👑" if user_id == lobby.host_id else ""
-                lines.append(f"{idx}. {spec['emoji']} **{lobby.names.get(user_id, '?')}** ({spec['label']}){host_mark}")
+                profile = lobby.profiles.get(user_id, {})
+                extra = f" · {profile['race']}" if profile.get("race") else ""
+                lines.append(f"{idx}. {spec['emoji']} **{lobby.display_name(user_id)}** ({spec['label']}{extra}){host_mark}")
             embed.add_field(name=f"참가자 ({len(lobby.members)}/{PARTY_MAX_MEMBERS})", value="\n".join(lines), inline=False)
         else:
             embed.add_field(name="참가자 (0명)", value="아직 없음 — 첫 번째 용사가 되어주세요!", inline=False)
@@ -429,12 +451,17 @@ class TRPGParty(commands.Cog):
             if changes:
                 embed.add_field(name="📦 변화", value="\n".join(changes)[:1024], inline=False)
 
+        if adv.combat is not None:
+            embed.add_field(name="⚔️ 전투 중!", value=combat_status_lines(adv.combat)[:1024], inline=False)
+
         embed.add_field(name="👥 파티", value=self._party_status_lines(adv)[:1024], inline=False)
 
         current = adv.current_character
         turn_line = f"⭐ 지금은 {current.name} 의 턴!" if current and adv.is_playing else ""
         footer = f"{turn_line}\n버튼으로 행동을 고르거나 ✍️ 자유 행동으로 직접 입력하세요."
-        if not opening and adv.quest:
+        if adv.combat is not None:
+            footer = f"{turn_line}\n⚔️ 전투 중! 공격/방어 버튼이나 ✍️ 자유 행동(물약·도주·꾀)으로 싸우세요."
+        elif not opening and adv.quest:
             footer = f"🎯 {adv.quest[:120]}\n{footer}"
         embed.set_footer(text=footer.strip()[:2048])
         return embed
@@ -449,10 +476,12 @@ class TRPGParty(commands.Cog):
             char = adv.members[uid]
             inventory = ", ".join(char.inventory) if char.inventory else "비어 있음"
             status = " (쓰러짐 💀)" if char.hp <= 0 else ""
+            race_part = f"종족: {char.race}\n" if char.race else ""
             embed.add_field(
                 name=f"{char.job_emoji} {char.name} — {char.job}{status}",
                 value=(
                     f"HP {_hp_bar(char.hp, char.max_hp)}\n"
+                    f"{race_part}"
                     f"능력치: {char.stats_line()}\n"
                     f"소지품: {inventory}"
                 )[:1024],
@@ -597,10 +626,15 @@ class TRPGParty(commands.Cog):
             if existing is not None and existing.is_playing:
                 return
 
-            members: Dict[str, TRPGCharacter] = {
-                str(user_id): TRPGCharacter.create(lobby.names.get(user_id, "모험가"), class_key)
-                for user_id, class_key in lobby.members.items()
-            }
+            members: Dict[str, TRPGCharacter] = {}
+            for user_id, class_key in lobby.members.items():
+                profile = lobby.profiles.get(user_id, {})
+                members[str(user_id)] = TRPGCharacter.create(
+                    profile.get("name") or lobby.names.get(user_id, "모험가"),
+                    class_key,
+                    race=profile.get("race", ""),
+                    background=profile.get("background", ""),
+                )
 
             try:
                 async with interaction.channel.typing():
@@ -665,6 +699,7 @@ class TRPGParty(commands.Cog):
         dc: int,
         fate_roll: bool,
         view: PartyAdventureView,
+        choice: Optional[dict] = None,
     ):
         adv = self.parties.get(key)
         if adv is None or not adv.is_playing:
@@ -711,7 +746,9 @@ class TRPGParty(commands.Cog):
             view.stop()
 
             channel = interaction.channel
-            check = roll_check(actor, stat, dc) if (stat or fate_roll) else None
+            # 전투 중 지정 행동(공격/방어)은 코드가 명중·피해를 굴리므로 별도 d20 판정을 하지 않는다.
+            in_combat_action = adv.combat is not None and (choice or {}).get("combat") in ("attack", "defend")
+            check = roll_check(actor, stat, dc) if (stat or fate_roll) and not in_combat_action else None
 
             header = f"🕹️ **{actor.name}**: {action_text}"
             if check:
@@ -724,7 +761,7 @@ class TRPGParty(commands.Cog):
             try:
                 async with channel.typing():
                     result = await asyncio.to_thread(
-                        play_party_turn, adv, actor_id, action_text, check, model=self._model()
+                        play_party_turn, adv, actor_id, action_text, check, choice=choice, model=self._model()
                     )
             except Exception as e:
                 logger.error(f"파티 TRPG 턴 처리 실패: {e}", exc_info=True)
@@ -738,6 +775,12 @@ class TRPGParty(commands.Cog):
                 return
 
             await self._autosave(key, adv)
+
+            if result.combat_log:
+                try:
+                    await channel.send("\n".join(result.combat_log))
+                except discord.HTTPException:
+                    logger.debug("전투 로그 전송 실패 (무시됨)")
 
             if not adv.is_playing:
                 try:
