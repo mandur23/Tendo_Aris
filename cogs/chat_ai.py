@@ -24,7 +24,7 @@ from urllib import error, request
 import discord
 from discord.ext import commands
 
-from GameSystem.TRPGEngine import TRPGAdventure
+from GameSystem.TRPGEngine import PartyAdventure, TRPGAdventure
 from utils.config import (
     COMMAND_MESSAGE_DELETE_DELAY,
     LOCAL_AI_BASE_URL,
@@ -40,7 +40,7 @@ from utils.config import (
     WEB_SEARCH_TIMEOUT_SECONDS,
 )
 from utils.discord_utils import safe_defer, safe_typing
-from utils.file_utils import load_trpg_saves
+from utils.file_utils import load_trpg_party_saves, load_trpg_saves
 from utils.knowledge_utils import knowledge_stats, search_knowledge
 from utils.llm_utils import extract_json_object, ollama_chat_sync
 from utils.web_search import search_web
@@ -484,6 +484,75 @@ class ChatAI(commands.Cog):
                 return data
         return None
 
+    def _find_party_adventure_sync(self, guild_id: int, channel_id: int) -> Optional[dict]:
+        """디스크 세이브에서 이 채널의 파티 모험 데이터를 찾는다."""
+        saves = load_trpg_party_saves()
+        data = saves.get(f"{guild_id}:{channel_id}")
+        return data if isinstance(data, dict) else None
+
+    async def _gather_party_context(self, guild_id: int, channel_id: int, user: discord.abc.User) -> str:
+        """이 채널의 파티 모험에 사용자가 참가 중이면 컨텍스트 블록을 만든다."""
+        adv: Optional[PartyAdventure] = None
+        party_cog = self.bot.get_cog("TRPGParty")
+        if party_cog is not None:
+            adv = getattr(party_cog, "parties", {}).get((guild_id, channel_id))
+
+        if adv is None:
+            try:
+                data = await asyncio.to_thread(
+                    self._find_party_adventure_sync, guild_id, channel_id
+                )
+            except Exception as e:
+                logger.debug(f"파티 TRPG 세이브 조회 실패(무시): {e}")
+                data = None
+            if data:
+                try:
+                    adv = PartyAdventure.from_dict(data)
+                except Exception as e:
+                    logger.debug(f"파티 TRPG 세이브 해석 실패(무시): {e}")
+                    adv = None
+
+        if adv is None or not adv.is_playing or str(user.id) not in adv.members:
+            return ""
+        return self._build_party_trpg_context(adv, str(user.id))
+
+    @staticmethod
+    def _build_party_trpg_context(adv: PartyAdventure, user_id: str) -> str:
+        own = adv.members.get(user_id)
+        lines = [
+            "[선생님이 참가 중인 파티 TRPG 모험 정보]",
+            f"제목: {adv.title} ({adv.genre_label}, {adv.turn}턴 진행, 파티 {len(adv.members)}명)",
+        ]
+        if adv.world:
+            lines.append(f"세계관: {adv.world[:700]}")
+        if adv.quest:
+            lines.append(f"퀘스트: {adv.quest[:300]}")
+        member_lines = []
+        for uid in adv.turn_order:
+            char = adv.members[uid]
+            mine = " ← 선생님의 캐릭터" if uid == user_id else ""
+            downed = " (쓰러짐)" if char.hp <= 0 else ""
+            member_lines.append(
+                f"- {char.name} ({char.job}) HP {char.hp}/{char.max_hp}{downed}{mine}"
+            )
+        lines.append("파티:\n" + "\n".join(member_lines))
+        if own:
+            inventory = ", ".join(own.inventory) if own.inventory else "없음"
+            lines.append(f"선생님 캐릭터 상세: 능력치 {own.stats_line()} / 소지품: {inventory}")
+        current = adv.current_character
+        if current is not None:
+            lines.append(f"현재 턴: {current.name}")
+        if adv.log:
+            lines.append("지난 기록:\n" + "\n".join(f"- {entry}" for entry in adv.log[-6:]))
+        if adv.scene:
+            lines.append(f"현재 장면: {adv.scene[:300]}")
+        lines.append(
+            "지침: 선생님이 파티 모험·세계관·퀘스트·파티원에 대해 물으면 위 정보를 근거로 "
+            "정확하게 답합니다. 위 정보에 없는 설정은 지어내지 않으며, "
+            "모험과 무관한 대화에서는 이 정보를 굳이 언급하지 않습니다."
+        )
+        return "\n".join(lines)
+
     async def _gather_trpg_context(
         self,
         guild: Optional[discord.Guild],
@@ -492,10 +561,15 @@ class ChatAI(commands.Cog):
     ) -> str:
         """사용자의 진행 중(메모리) 또는 저장된(디스크) TRPG 모험을 찾아 컨텍스트 블록을 만든다.
 
+        이 채널의 파티 모험(본인 참가 중)을 우선 참조하고, 없으면 1인용 모험을 찾는다.
         모험이 없으면 빈 문자열을 반환하며, 조회 실패는 대화를 막지 않도록 조용히 무시한다.
         """
         guild_id = guild.id if guild else 0
         channel_id = getattr(channel, "id", 0)
+
+        party_context = await self._gather_party_context(guild_id, channel_id, user)
+        if party_context:
+            return party_context
 
         adv: Optional[TRPGAdventure] = None
         trpg_cog = self.bot.get_cog("TRPG")

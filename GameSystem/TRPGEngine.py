@@ -114,6 +114,31 @@ GM_SYSTEM_PROMPT = (
     "- dc는 판정 난이도로 8(쉬움)~18(매우 어려움) 사이 정수입니다."
 )
 
+GM_PARTY_SYSTEM_PROMPT = (
+    "당신은 한국어 TRPG의 게임 마스터(GM)입니다. 이름은 '아리스'이며, 레트로 RPG를 사랑하는 열정적인 GM입니다.\n"
+    "여러 명의 플레이어가 한 파티로 함께 모험합니다. 각 턴마다 정해진 한 명이 행동하며,\n"
+    "당신은 그 행동과 주사위 판정 결과를 바탕으로 장면을 서술하고 다음 선택지를 제시합니다.\n"
+    "\n"
+    "[서술 규칙]\n"
+    "- 반드시 자연스러운 한국어로만 작성합니다. 한자·일본어 가나·키릴 등 외국 문자는 한 글자도 쓰지 않습니다.\n"
+    "- 각 캐릭터는 이름으로 지칭합니다. 파티 전체가 같은 장면에 함께 있습니다.\n"
+    "- 이번 턴에 행동한 캐릭터를 중심으로 서술하되, 다른 파티원의 가벼운 반응을 곁들여도 됩니다.\n"
+    "- 행동하지 않은 캐릭터의 중요한 행동이나 판정을 마음대로 결정하지 않습니다.\n"
+    "- 장면 서술은 3~7문장으로 생생하되 간결하게 씁니다.\n"
+    "- 주사위 판정 결과를 절대 뒤집지 않습니다. 성공이면 성공으로, 실패면 실패로 서술합니다.\n"
+    "- 대성공이면 기대 이상의 성과를, 대실패면 상황이 악화되는 전개를 서술합니다.\n"
+    "- 세계관·퀘스트·지금까지의 기록과 모순되지 않게 전개합니다.\n"
+    "- HP가 0이 되어 쓰러진 캐릭터는 회복되기 전까지 행동할 수 없는 상태로 서술합니다.\n"
+    "- 이야기가 정체되지 않도록 매 턴 새로운 정보나 사건을 하나씩 제시합니다.\n"
+    "\n"
+    "[출력 형식]\n"
+    "- 반드시 유효한 JSON 객체 하나만 출력합니다. JSON 밖에 다른 텍스트를 쓰지 않습니다.\n"
+    "- 선택지(choices)는 2~4개, 각 선택지 텍스트는 25자 이내로, 다음 턴 캐릭터가 할 만한 행동으로 씁니다.\n"
+    "- 선택지의 stat은 힘/민첩/지능/매력 중 판정이 필요한 스탯, 판정이 필요 없는 안전한 행동이면 \"없음\"으로 씁니다.\n"
+    "- dc는 판정 난이도로 8(쉬움)~18(매우 어려움) 사이 정수입니다.\n"
+    "- hp_changes 에는 이번 장면에서 실제로 피해나 회복이 있었던 캐릭터만 캐릭터 이름과 정수 변화량으로 적습니다."
+)
+
 
 # ------------------------------------------------------------------ 주사위 판정
 @dataclass
@@ -365,12 +390,18 @@ def _normalize_hp_change(raw) -> int:
     return max(-HP_CHANGE_LIMIT, min(HP_CHANGE_LIMIT, value))
 
 
-def _chat_json(user_content: str, *, model: Optional[str], temperature: float) -> dict:
+def _chat_json(
+    user_content: str,
+    *,
+    model: Optional[str],
+    temperature: float,
+    system: str = GM_SYSTEM_PROMPT,
+) -> dict:
     """GM 시스템 프롬프트로 LLM을 호출하고 JSON 객체를 파싱한다. 실패 시 1회 재시도."""
     messages = [{"role": "user", "content": user_content}]
     reply = ollama_chat_sync(
         messages,
-        system=GM_SYSTEM_PROMPT,
+        system=system,
         model=model,
         temperature=temperature,
         format_json=True,
@@ -386,7 +417,7 @@ def _chat_json(user_content: str, *, model: Optional[str], temperature: float) -
     ]
     reply = ollama_chat_sync(
         retry_messages,
-        system=GM_SYSTEM_PROMPT,
+        system=system,
         model=model,
         temperature=temperature,
         format_json=True,
@@ -534,6 +565,367 @@ def play_turn(
     return TurnResult(
         narration=narration,
         hp_change=hp_change,
+        items_added=items_added,
+        items_removed=items_removed,
+        ended=not adv.is_playing,
+        victory=adv.status == "victory",
+    )
+
+
+# ==================================================================== 파티(멀티플레이어) 모험
+PARTY_MAX_MEMBERS = 4
+
+
+def _party_member_line(char: TRPGCharacter) -> str:
+    """파티 목록/프롬프트용 캐릭터 한 줄 요약."""
+    inv = ", ".join(char.inventory) if char.inventory else "없음"
+    line = (
+        f"{char.name} ({char.job}) — HP {char.hp}/{char.max_hp}, "
+        f"능력치: {char.stats_line()}, 소지품: {inv}"
+    )
+    if char.hp <= 0:
+        line += " [쓰러짐]"
+    return line
+
+
+@dataclass
+class PartyAdventure:
+    """여러 플레이어가 함께 진행하는 파티 모험 상태.
+
+    members 는 참가 순서를 유지하는 dict(user_id 문자열 -> 캐릭터)이며,
+    턴은 turn_order 를 따라 돌아가고 HP 0인 멤버는 건너뛴다.
+    """
+
+    genre_key: str
+    title: str
+    world: str
+    quest: str
+    host_id: str
+    members: Dict[str, TRPGCharacter]
+    scene: str
+    choices: List[Dict] = field(default_factory=list)
+    turn: int = 0
+    turn_order: List[str] = field(default_factory=list)
+    current_idx: int = 0
+    log: List[str] = field(default_factory=list)
+    recent: List[Dict] = field(default_factory=list)
+    status: str = "playing"                              # playing / victory / dead / over
+
+    def __post_init__(self):
+        if not self.turn_order:
+            self.turn_order = list(self.members.keys())
+
+    @property
+    def genre_label(self) -> str:
+        return GENRES.get(self.genre_key, {}).get("label", self.genre_key)
+
+    @property
+    def genre_emoji(self) -> str:
+        return GENRES.get(self.genre_key, {}).get("emoji", "🎲")
+
+    @property
+    def is_playing(self) -> bool:
+        return self.status == "playing"
+
+    @property
+    def current_actor_id(self) -> Optional[str]:
+        if not self.turn_order:
+            return None
+        return self.turn_order[self.current_idx % len(self.turn_order)]
+
+    @property
+    def current_character(self) -> Optional[TRPGCharacter]:
+        actor_id = self.current_actor_id
+        return self.members.get(actor_id) if actor_id else None
+
+    def alive_ids(self) -> List[str]:
+        return [uid for uid in self.turn_order if self.members[uid].hp > 0]
+
+    def advance_turn(self) -> None:
+        """다음 생존 멤버에게 턴을 넘긴다. 생존자가 없으면 그대로 둔다."""
+        count = len(self.turn_order)
+        if count == 0:
+            return
+        for step in range(1, count + 1):
+            candidate = (self.current_idx + step) % count
+            if self.members[self.turn_order[candidate]].hp > 0:
+                self.current_idx = candidate
+                return
+
+    def ensure_current_alive(self) -> None:
+        """현재 턴 멤버가 쓰러져 있으면 다음 생존 멤버로 턴을 옮긴다 (세이브 로드 대비)."""
+        char = self.current_character
+        if char is not None and char.hp <= 0 and self.alive_ids():
+            self.advance_turn()
+
+    def record_turn(self, actor_name: str, action: str, result_band: str, narration: str) -> None:
+        self.recent.append({
+            "actor": actor_name,
+            "action": action,
+            "result": result_band,
+            "narration": narration[:400],
+        })
+        if len(self.recent) > RECENT_TURNS_IN_PROMPT:
+            oldest = self.recent.pop(0)
+            line = f"{oldest.get('actor', '?')}: {oldest['action']} → {oldest['result']}"
+            self.log.append(line[:80])
+            if len(self.log) > LOG_LINES_IN_PROMPT:
+                self.log = self.log[-LOG_LINES_IN_PROMPT:]
+
+    def to_dict(self) -> dict:
+        return {
+            "version": 1,
+            "genre_key": self.genre_key,
+            "title": self.title,
+            "world": self.world,
+            "quest": self.quest,
+            "host_id": self.host_id,
+            "members": {uid: char.to_dict() for uid, char in self.members.items()},
+            "scene": self.scene,
+            "choices": list(self.choices),
+            "turn": self.turn,
+            "turn_order": list(self.turn_order),
+            "current_idx": self.current_idx,
+            "log": list(self.log),
+            "recent": list(self.recent),
+            "status": self.status,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "PartyAdventure":
+        members = {
+            str(uid): TRPGCharacter.from_dict(char_data)
+            for uid, char_data in data.get("members", {}).items()
+        }
+        adv = cls(
+            genre_key=data["genre_key"],
+            title=data.get("title", "이름 없는 모험"),
+            world=data.get("world", ""),
+            quest=data.get("quest", ""),
+            host_id=str(data.get("host_id", "")),
+            members=members,
+            scene=data.get("scene", ""),
+            choices=list(data.get("choices", [])) or [dict(c) for c in FALLBACK_CHOICES],
+            turn=int(data.get("turn", 0)),
+            turn_order=[str(uid) for uid in data.get("turn_order", [])],
+            current_idx=int(data.get("current_idx", 0)),
+            log=list(data.get("log", [])),
+            recent=list(data.get("recent", [])),
+            status=data.get("status", "playing"),
+        )
+        # 세이브가 손상되어 turn_order 에 없는 멤버가 있어도 게임이 멈추지 않게 정리한다.
+        adv.turn_order = [uid for uid in adv.turn_order if uid in adv.members]
+        if not adv.turn_order:
+            adv.turn_order = list(adv.members.keys())
+        adv.current_idx %= max(1, len(adv.turn_order))
+        return adv
+
+
+@dataclass
+class PartyTurnResult:
+    """파티 한 턴 처리 결과. 상태 변화는 이미 어드벤처에 적용되어 있다."""
+
+    narration: str
+    hp_changes: Dict[str, int]           # 캐릭터 이름 -> 실제 적용된 HP 변화량
+    items_added: List[str]
+    items_removed: List[str]
+    ended: bool
+    victory: bool
+
+
+def generate_party_scenario(
+    genre_key: str,
+    host_id: str,
+    members: Dict[str, TRPGCharacter],
+    *,
+    model: Optional[str] = None,
+) -> PartyAdventure:
+    """장르와 파티 구성원을 바탕으로 새 파티 모험(세계관·퀘스트·첫 장면)을 생성한다."""
+    genre = GENRES[genre_key]
+    party_lines = "\n".join(f"- {_party_member_line(char)}" for char in members.values())
+    user_content = (
+        f"새 TRPG 모험을 생성하세요. 이번 모험은 {len(members)}명이 한 파티로 함께 진행합니다.\n"
+        f"장르: {genre['label']} — {genre['hint']}\n"
+        f"[파티]\n{party_lines}\n"
+        "\n"
+        "다음 JSON 형식으로만 답하세요:\n"
+        "{\n"
+        '  "title": "모험 제목 (20자 이내)",\n'
+        '  "world": "세계관 소개 (3~4문장)",\n'
+        '  "quest": "파티가 함께 달성해야 할 공동 목표 퀘스트 (1~2문장)",\n'
+        '  "opening": "첫 장면 서술 (4~7문장, 파티 전원이 함께 등장해 퀘스트를 받는 상황, 각 캐릭터를 이름으로 지칭)",\n'
+        '  "choices": [{"text": "선택지 행동 (25자 이내)", "stat": "힘|민첩|지능|매력|없음", "dc": 12}]\n'
+        "}"
+    )
+    data = _chat_json(
+        user_content,
+        model=model,
+        temperature=SCENARIO_TEMPERATURE,
+        system=GM_PARTY_SYSTEM_PROMPT,
+    )
+
+    title = _clean_text(data.get("title", ""), 40) or f"{genre['label']} 모험"
+    world = _clean_text(data.get("world", ""), 700)
+    quest = _clean_text(data.get("quest", ""), 300)
+    opening = _clean_text(data.get("opening", ""), NARRATION_MAX)
+    if not opening:
+        raise RuntimeError("GM(AI)이 첫 장면을 생성하지 못했습니다. 다시 시도해주세요.")
+
+    return PartyAdventure(
+        genre_key=genre_key,
+        title=title,
+        world=world,
+        quest=quest,
+        host_id=str(host_id),
+        members=members,
+        scene=opening,
+        choices=_normalize_choices(data.get("choices")),
+        turn=1,
+    )
+
+
+def _normalize_party_hp_changes(raw, members: Dict[str, TRPGCharacter]) -> Dict[str, int]:
+    """LLM이 제안한 hp_changes 목록을 {user_id: 변화량} 으로 정규화한다."""
+    if not isinstance(raw, list):
+        return {}
+    name_to_uid = {char.name: uid for uid, char in members.items()}
+    changes: Dict[str, int] = {}
+    for item in raw[:PARTY_MAX_MEMBERS * 2]:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        name = name.strip()
+        uid = name_to_uid.get(name)
+        if uid is None:
+            # 호칭이 덧붙는 경우("전사 알렉스" 등)를 대비한 부분 일치
+            uid = next(
+                (u for n, u in name_to_uid.items() if n and (n in name or name in n)),
+                None,
+            )
+        if uid is None:
+            continue
+        delta = _normalize_hp_change(item.get("change"))
+        if delta:
+            changes[uid] = max(
+                -HP_CHANGE_LIMIT, min(HP_CHANGE_LIMIT, changes.get(uid, 0) + delta)
+            )
+    return changes
+
+
+def _build_party_turn_prompt(
+    adv: PartyAdventure,
+    actor: TRPGCharacter,
+    action_text: str,
+    check: Optional[CheckResult],
+) -> str:
+    lines = [
+        f"[세계관] {adv.world}",
+        f"[퀘스트] {adv.quest}",
+        "[파티 상태]\n" + "\n".join(f"- {_party_member_line(char)}" for char in adv.members.values()),
+    ]
+    if adv.log:
+        lines.append("[지난 모험 기록]\n" + "\n".join(f"- {entry}" for entry in adv.log))
+    # 마지막 recent 항목의 서술은 [현재 장면]과 같으므로 행동/결과만 싣고 본문은 중복시키지 않는다.
+    for entry in adv.recent[:-1]:
+        lines.append(
+            f"[이전 턴] {entry.get('actor', '?')}의 행동: {entry['action']} ({entry['result']})\n{entry['narration']}"
+        )
+    if adv.recent:
+        last = adv.recent[-1]
+        lines.append(f"[직전 행동] {last.get('actor', '?')}: {last['action']} ({last['result']})")
+    lines.append(f"[현재 장면]\n{adv.scene}")
+    lines.append(f"[이번 턴 행동] {actor.name} ({actor.job})의 행동: {action_text}")
+    if check is not None:
+        lines.append(f"[판정 결과] {check.prompt_text()}")
+    else:
+        lines.append("[판정 결과] 판정 없음 (안전한 행동, 실패 없이 진행)")
+    lines.append(
+        "\n판정 결과에 충실하게 다음 장면을 서술하고, 다음 JSON 형식으로만 답하세요:\n"
+        "{\n"
+        '  "narration": "다음 장면 서술 (3~7문장)",\n'
+        '  "choices": [{"text": "선택지 행동 (25자 이내)", "stat": "힘|민첩|지능|매력|없음", "dc": 12}],\n'
+        '  "hp_changes": [{"name": "캐릭터 이름", "change": -3}],\n'
+        '  "items_add": ["새로 얻은 아이템"],\n'
+        '  "items_remove": ["잃거나 사용한 아이템"],\n'
+        '  "game_over": false,\n'
+        '  "victory": false\n'
+        "}\n"
+        "규칙: hp_changes 의 change 는 -10~10 사이 정수이며, 이번 장면에서 실제로 피해를 입거나 "
+        "회복한 캐릭터만 포함합니다 (없으면 빈 배열). "
+        f"items_add/items_remove 는 행동한 캐릭터({actor.name})의 소지품 변화만 적습니다. "
+        "victory 는 파티가 퀘스트를 최종 달성한 경우에만 true, "
+        "game_over 는 파티가 전멸하는 등 모험이 끝난 경우에만 true 로 합니다."
+    )
+    return "\n\n".join(lines)
+
+
+def play_party_turn(
+    adv: PartyAdventure,
+    actor_id: str,
+    action_text: str,
+    check: Optional[CheckResult],
+    *,
+    model: Optional[str] = None,
+) -> PartyTurnResult:
+    """파티 멤버 한 명의 행동 턴을 처리하고 어드벤처 상태를 갱신한다."""
+    actor = adv.members.get(str(actor_id))
+    if actor is None:
+        raise ValueError("파티에 없는 플레이어의 행동입니다.")
+
+    data = _chat_json(
+        _build_party_turn_prompt(adv, actor, action_text, check),
+        model=model,
+        temperature=TURN_TEMPERATURE,
+        system=GM_PARTY_SYSTEM_PROMPT,
+    )
+
+    narration = _clean_text(data.get("narration", ""), NARRATION_MAX)
+    if not narration:
+        raise RuntimeError("GM(AI)이 장면 서술을 생성하지 못했습니다. 다시 시도해주세요.")
+
+    # HP 변화는 파티 전원 대상 (LLM이 이름으로 지목), 아이템 변화는 행동자만 대상.
+    hp_changes: Dict[str, int] = {}
+    for uid, delta in _normalize_party_hp_changes(data.get("hp_changes"), adv.members).items():
+        applied = adv.members[uid].apply_hp(delta)
+        if applied:
+            hp_changes[adv.members[uid].name] = applied
+
+    items_added: List[str] = []
+    for item in _normalize_items(data.get("items_add")):
+        if len(actor.inventory) >= INVENTORY_MAX:
+            break
+        if item not in actor.inventory:
+            actor.inventory.append(item)
+            items_added.append(item)
+
+    items_removed: List[str] = []
+    for item in _normalize_items(data.get("items_remove")):
+        if item in actor.inventory:
+            actor.inventory.remove(item)
+            items_removed.append(item)
+
+    victory = bool(data.get("victory"))
+    game_over = bool(data.get("game_over"))
+    if not adv.alive_ids():
+        adv.status = "dead"                 # 파티 전멸
+    elif victory:
+        adv.status = "victory"
+    elif game_over:
+        adv.status = "over"
+
+    result_band = check.band if check else "진행"
+    adv.record_turn(actor.name, action_text, result_band, narration)
+    adv.scene = narration
+    adv.choices = _normalize_choices(data.get("choices"))
+    adv.turn += 1
+    if adv.is_playing:
+        adv.advance_turn()
+
+    return PartyTurnResult(
+        narration=narration,
+        hp_changes=hp_changes,
         items_added=items_added,
         items_removed=items_removed,
         ended=not adv.is_playing,
