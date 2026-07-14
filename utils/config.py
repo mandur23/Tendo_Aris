@@ -88,6 +88,25 @@ except (TypeError, ValueError):
 # 모델을 메모리에 유지할 시간 (유휴 후 첫 응답 지연 방지). 예: '30m', '1h', '-1'(무제한)
 LOCAL_AI_KEEP_ALIVE = os.getenv('LOCAL_AI_KEEP_ALIVE', '30m').strip() or '30m'
 
+# 대화형 AI 웹 검색 (DuckDuckGo, API 키 불필요) 설정
+# 켜져 있으면 매 메시지마다 LLM이 검색 필요 여부를 판단하고, 필요할 때만 검색 결과를 참고해 답한다.
+LOCAL_AI_WEB_SEARCH_ENABLED = os.getenv('LOCAL_AI_WEB_SEARCH_ENABLED', 'true').strip().lower() in ('1', 'true', 'yes', 'on')
+
+try:
+    WEB_SEARCH_MAX_RESULTS = int(os.getenv('WEB_SEARCH_MAX_RESULTS', '3'))
+except (TypeError, ValueError):
+    WEB_SEARCH_MAX_RESULTS = 3
+    if os.getenv('WEB_SEARCH_MAX_RESULTS') is not None:
+        logger.warning("WEB_SEARCH_MAX_RESULTS가 숫자가 아니에요. 3을 사용할게요.")
+WEB_SEARCH_MAX_RESULTS = max(1, min(8, WEB_SEARCH_MAX_RESULTS))
+
+try:
+    WEB_SEARCH_TIMEOUT_SECONDS = int(os.getenv('WEB_SEARCH_TIMEOUT_SECONDS', '10'))
+except (TypeError, ValueError):
+    WEB_SEARCH_TIMEOUT_SECONDS = 10
+    if os.getenv('WEB_SEARCH_TIMEOUT_SECONDS') is not None:
+        logger.warning("WEB_SEARCH_TIMEOUT_SECONDS가 숫자가 아니에요. 10초를 사용할게요.")
+
 # 웹 관리자 대시보드 설정
 # 보안상 기본값은 로컬(127.0.0.1) 전용이며, WEB_ADMIN_PASSWORD가 비어 있으면 시작하지 않는다.
 WEB_ADMIN_ENABLED = os.getenv('WEB_ADMIN_ENABLED', 'true').strip().lower() in ('1', 'true', 'yes', 'on')

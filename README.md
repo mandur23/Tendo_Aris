@@ -38,6 +38,9 @@
 - **AI 질의응답**: 로컬 LLM(Ollama) 기반 자연어 대화
 - **음성 연계**: AI 답변을 TTS로 바로 읽기 가능
 - **명령어/슬래시 지원**: Prefix 명령어와 `/ai` 그룹 모두 제공
+- **TRPG 모험 연동**: 진행 중인(또는 저장된) TRPG 모험의 세계관·퀘스트·캐릭터를 대화에서 물어보면 답변에 반영
+- **웹 검색(RAG)**: 최신 정보가 필요한 질문이면 AI가 스스로 판단해 DuckDuckGo 검색 결과를 참고해 답변 (API 키 불필요)
+- **지식 문서 검색**: `data/knowledge/` 폴더의 `.md`/`.txt` 문서를 검색해 답변에 반영 (서버 규칙, 설정 자료 등)
 
 ### 🎲 야추 다이스 게임
 - **멀티플레이어 지원**: 여러 명이 동시에 플레이 가능
@@ -108,6 +111,10 @@ LOCAL_AI_MODEL=llama3.1:8b
 LOCAL_AI_MAX_PROMPT_CHARS=2000
 LOCAL_AI_TEMPERATURE=0.7
 LOCAL_AI_TIMEOUT_SECONDS=120
+# 대화 AI 웹 검색 (선택사항, 기본값 켜짐 / DuckDuckGo, API 키 불필요)
+LOCAL_AI_WEB_SEARCH_ENABLED=true
+WEB_SEARCH_MAX_RESULTS=3
+WEB_SEARCH_TIMEOUT_SECONDS=10
 ```
 
 #### 3.2 FFmpeg 설치 및 경로 설정
@@ -260,6 +267,10 @@ python bot.py
 | `!대화 <질문>` | `!ai`, `!챗`, `!질문` | AI에게 질문하고 텍스트 답변 받기 |
 | `!대화tts <질문>` | `!aitts`, `!챗tts` | AI 답변 생성 후 TTS로 음성 재생 |
 | `!ai설정` | `!aisettings` | AI 연동 상태/모델 설정 확인 |
+| `!지식` | `!knowledge`, `!지식목록` | AI가 참조하는 지식 문서(`data/knowledge/`) 상태 확인 |
+
+**대화 중 자동 참조:** 아리스는 답변할 때 ① 진행 중인 TRPG 모험 정보, ② `data/knowledge/` 지식 문서,
+③ 웹 검색 결과(최신 정보가 필요하다고 판단한 경우에만)를 자동으로 참고합니다.
 
 #### 슬래시 명령어
 
@@ -413,6 +424,8 @@ Tendo_Aris/
 │   ├── tts_utils.py            # TTS 유틸리티 (gTTS)
 │   ├── rvc_utils.py            # RVC TTS 유틸리티
 │   ├── llm_utils.py            # 로컬 LLM(Ollama) 공용 호출 유틸리티
+│   ├── web_search.py           # 웹 검색 유틸리티 (DuckDuckGo, 키 불필요)
+│   ├── knowledge_utils.py      # 지식 문서 검색 유틸리티 (data/knowledge/)
 │   └── ytdl_utils.py           # YouTube 다운로더 유틸리티
 │
 ├── logs/                       # 로그 파일 디렉토리
@@ -426,7 +439,8 @@ Tendo_Aris/
 │   ├── history.json            # 재생 기록 데이터 (JSON 모드, 자동 생성)
 │   ├── tts_settings.json       # TTS 설정 데이터 (자동 생성)
 │   ├── rvc_models.json         # RVC 모델 설정 데이터 (자동 생성)
-│   └── trpg_saves.json         # AI TRPG 세이브 데이터 (자동 생성)
+│   ├── trpg_saves.json         # AI TRPG 세이브 데이터 (자동 생성)
+│   └── knowledge/              # 대화 AI가 참조하는 지식 문서 (.md/.txt 직접 추가)
 │
 ├── models/                     # RVC 모델 디렉토리
 │   └── [RVC 모델 폴더들]       # .pth 및 .index 파일 포함

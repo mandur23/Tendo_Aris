@@ -101,6 +101,9 @@ def ollama_chat_sync(
     temperature: Optional[float] = None,
     format_json: bool = False,
     timeout: Optional[int] = None,
+    keep_alive: Optional[str] = None,
+    num_predict: Optional[int] = None,
+    num_ctx: Optional[int] = None,
 ) -> str:
     """Ollama /api/chat 를 동기 호출하고 응답 텍스트를 반환한다.
 
@@ -114,14 +117,22 @@ def ollama_chat_sync(
         payload_messages.append({"role": "system", "content": system})
     payload_messages.extend(messages)
 
+    options: Dict = {
+        "temperature": LOCAL_AI_TEMPERATURE if temperature is None else temperature,
+    }
+    if num_predict is not None:
+        options["num_predict"] = num_predict
+    if num_ctx is not None:
+        options["num_ctx"] = num_ctx
+
     payload = {
         "model": model or LOCAL_AI_MODEL,
         "messages": payload_messages,
         "stream": False,
-        "options": {
-            "temperature": LOCAL_AI_TEMPERATURE if temperature is None else temperature,
-        },
+        "options": options,
     }
+    if keep_alive is not None:
+        payload["keep_alive"] = keep_alive
     if format_json:
         payload["format"] = "json"
 

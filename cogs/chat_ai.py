@@ -4,6 +4,11 @@
 세션 동안에는 그 사용자가 명령어 접두사 없이 보내는 일반 메시지에도 아리스가 자동으로 답한다.
 `!대화 종료` (혹은 `!대화tts 종료`) 로 세션을 종료한다.
 
+답변 생성 시 다음 컨텍스트를 자동으로 참조한다:
+- 진행 중인(또는 저장된) TRPG 모험의 세계관·퀘스트·캐릭터 정보
+- data/knowledge/ 폴더의 지식 문서 (rapidfuzz 키워드 검색)
+- 웹 검색 결과 (LLM이 필요하다고 판단한 경우에만, DuckDuckGo)
+
 아리스 페르소나: 모바일 게임 '블루 아카이브' 의 텐도 아리스 (게임 개발부 / 자칭 용사).
 """
 import asyncio
@@ -12,12 +17,14 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Dict, List, Optional, Tuple
 from urllib import error, request
 
 import discord
 from discord.ext import commands
 
+from GameSystem.TRPGEngine import TRPGAdventure
 from utils.config import (
     COMMAND_MESSAGE_DELETE_DELAY,
     LOCAL_AI_BASE_URL,
@@ -28,8 +35,15 @@ from utils.config import (
     LOCAL_AI_NUM_PREDICT,
     LOCAL_AI_TEMPERATURE,
     LOCAL_AI_TIMEOUT_SECONDS,
+    LOCAL_AI_WEB_SEARCH_ENABLED,
+    WEB_SEARCH_MAX_RESULTS,
+    WEB_SEARCH_TIMEOUT_SECONDS,
 )
 from utils.discord_utils import safe_defer, safe_typing
+from utils.file_utils import load_trpg_saves
+from utils.knowledge_utils import knowledge_stats, search_knowledge
+from utils.llm_utils import extract_json_object, ollama_chat_sync
+from utils.web_search import search_web
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +112,25 @@ SESSION_COMPACT_TRIGGER = SESSION_HISTORY_MAX_TURNS * 2 + 6
 SESSION_HISTORY_HARD_CAP = SESSION_HISTORY_MAX_TURNS * 2 * 3
 TTS_MAX_CHARS = 200                  # 답변이 길어도 음성 합성은 앞부분만 (지연·비용 방지).
 _EXIT_KEYWORDS = {"종료", "끝", "그만", "stop", "exit", "off", "quit", "bye"}
+
+# 웹 검색 필요 여부를 판단하는 전용 시스템 프롬프트 (페르소나와 무관).
+WEB_SEARCH_DECISION_SYSTEM = (
+    "당신은 대화 도우미의 웹 검색 판단기입니다. 마지막 사용자 메시지에 답하기 위해 "
+    "웹 검색이 필요한지 판단하세요.\n"
+    "- 검색이 필요한 경우: 최신 정보(뉴스, 날씨, 시세, 경기 결과, 출시/업데이트 소식), "
+    "구체적인 사실 확인(날짜, 수치, 인물, 장소), 화자가 잘 모를 법한 고유명사나 전문 지식.\n"
+    "- 검색이 필요 없는 경우: 인사와 일상 잡담, 감상이나 의견, 창작 요청, "
+    "대화 기록만으로 답할 수 있는 질문, 사용자 자신에 대한 이야기.\n"
+    '- 다음 JSON 객체 하나만 출력합니다: {"search": true 또는 false, "query": "검색어"}\n'
+    "- query는 검색 엔진에 바로 넣을 수 있는 독립적인 검색어로 작성합니다. "
+    "대명사(그거, 아까 그 사람 등)를 쓰지 말고 대화 맥락에서 구체적인 단어로 바꿔 씁니다.\n"
+    "- 확신이 없으면 search를 false로 합니다."
+)
+
+# 웹 검색 판단 결과(JSON)가 길 필요가 없으므로 생성 길이를 짧게 제한한다.
+WEB_SEARCH_DECISION_NUM_PREDICT = 150
+# 이 길이 미만의 메시지(ㅋㅋ, 응 등)는 검색 판단 호출 자체를 생략한다.
+WEB_SEARCH_MIN_PROMPT_CHARS = 4
 
 # 오래된 대화를 압축할 때 쓰는 요약 전용 시스템 프롬프트 (페르소나와 무관).
 SUMMARY_SYSTEM_PROMPT = (
@@ -377,6 +410,7 @@ class ChatAI(commands.Cog):
         username: str,
         history: Optional[List[Dict[str, str]]] = None,
         summary: str = "",
+        extra_contexts: Optional[List[str]] = None,
     ) -> str:
         # 히스토리에 저장되는 것과 동일한 "(이름) 내용" 형식을 항상 사용해
         # 첫 메시지와 이후 컨텍스트의 형식이 어긋나지 않도록 한다.
@@ -384,14 +418,16 @@ class ChatAI(commands.Cog):
             {"role": "user", "content": f"({username}) {prompt}"}
         ]
 
-        extra_system = ""
+        context_blocks: List[str] = []
         if summary:
-            extra_system = (
+            context_blocks.append(
                 "[지난 대화 요약]\n"
                 f"{summary}\n"
                 "위 요약은 이 대화에서 히스토리에 없는 이전 내용의 기억입니다. "
                 "필요할 때 자연스럽게 참고하되, 요약문을 그대로 인용하지 마세요."
             )
+        context_blocks.extend(block for block in (extra_contexts or []) if block)
+        extra_system = "\n\n".join(context_blocks)
 
         try:
             return self._request_chat_korean(self.active_model, messages, extra_system=extra_system)
@@ -417,6 +453,7 @@ class ChatAI(commands.Cog):
         username: str,
         history: Optional[List[Dict[str, str]]] = None,
         summary: str = "",
+        extra_contexts: Optional[List[str]] = None,
     ) -> str:
         if not self._is_ai_available():
             raise ValueError("로컬 AI 설정이 비어 있습니다.")
@@ -426,8 +463,208 @@ class ChatAI(commands.Cog):
             raise ValueError("질문 내용이 비어있습니다.")
 
         return await asyncio.to_thread(
-            self._call_local_ai_sync, prepared_prompt, username, history, summary
+            self._call_local_ai_sync, prepared_prompt, username, history, summary, extra_contexts
         )
+
+    # ------------------------------------------------------------------ TRPG 모험 컨텍스트
+    def _find_saved_adventure_sync(self, guild_id: int, channel_id: int, user_id: int) -> Optional[dict]:
+        """디스크 세이브에서 이 사용자의 모험 데이터를 찾는다. 같은 채널 세이브를 우선한다."""
+        saves = load_trpg_saves()
+        exact = saves.get(f"{guild_id}:{channel_id}:{user_id}")
+        if isinstance(exact, dict):
+            return exact
+        for key_str, data in saves.items():
+            parts = key_str.split(":")
+            if (
+                len(parts) == 3
+                and parts[0] == str(guild_id)
+                and parts[2] == str(user_id)
+                and isinstance(data, dict)
+            ):
+                return data
+        return None
+
+    async def _gather_trpg_context(
+        self,
+        guild: Optional[discord.Guild],
+        channel: discord.abc.Messageable,
+        user: discord.abc.User,
+    ) -> str:
+        """사용자의 진행 중(메모리) 또는 저장된(디스크) TRPG 모험을 찾아 컨텍스트 블록을 만든다.
+
+        모험이 없으면 빈 문자열을 반환하며, 조회 실패는 대화를 막지 않도록 조용히 무시한다.
+        """
+        guild_id = guild.id if guild else 0
+        channel_id = getattr(channel, "id", 0)
+
+        adv: Optional[TRPGAdventure] = None
+        trpg_cog = self.bot.get_cog("TRPG")
+        if trpg_cog is not None:
+            adventures = getattr(trpg_cog, "adventures", {})
+            adv = adventures.get((guild_id, channel_id, user.id))
+            if adv is None or not adv.is_playing:
+                adv = next(
+                    (
+                        a for k, a in adventures.items()
+                        if k[0] == guild_id and k[2] == user.id and a.is_playing
+                    ),
+                    None,
+                )
+
+        if adv is None or not adv.is_playing:
+            try:
+                data = await asyncio.to_thread(
+                    self._find_saved_adventure_sync, guild_id, channel_id, user.id
+                )
+            except Exception as e:
+                logger.debug(f"TRPG 세이브 조회 실패(무시): {e}")
+                data = None
+            if data:
+                try:
+                    adv = TRPGAdventure.from_dict(data)
+                except Exception as e:
+                    logger.debug(f"TRPG 세이브 해석 실패(무시): {e}")
+                    adv = None
+
+        if adv is None or not adv.is_playing:
+            return ""
+        return self._build_trpg_context(adv)
+
+    @staticmethod
+    def _build_trpg_context(adv: TRPGAdventure) -> str:
+        char = adv.character
+        inventory = ", ".join(char.inventory) if char.inventory else "없음"
+        lines = [
+            "[선생님의 TRPG 모험 정보]",
+            f"제목: {adv.title} ({adv.genre_label}, {adv.turn}턴 진행)",
+        ]
+        if adv.world:
+            lines.append(f"세계관: {adv.world[:700]}")
+        if adv.quest:
+            lines.append(f"퀘스트: {adv.quest[:300]}")
+        lines.append(
+            f"캐릭터: {char.name} ({char.job}) / HP {char.hp}/{char.max_hp} / "
+            f"능력치 {char.stats_line()} / 소지품: {inventory}"
+        )
+        if adv.log:
+            lines.append("지난 기록:\n" + "\n".join(f"- {entry}" for entry in adv.log[-6:]))
+        if adv.scene:
+            lines.append(f"현재 장면: {adv.scene[:300]}")
+        lines.append(
+            "지침: 선생님이 진행 중인 모험·세계관·퀘스트·캐릭터에 대해 물으면 위 정보를 근거로 "
+            "정확하게 답합니다. 위 정보에 없는 설정은 지어내지 않으며, "
+            "모험과 무관한 대화에서는 이 정보를 굳이 언급하지 않습니다."
+        )
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------ 지식 문서 검색
+    @staticmethod
+    def _gather_knowledge_context_sync(prompt: str) -> str:
+        """data/knowledge/ 문서에서 질문과 관련된 청크를 찾아 컨텍스트 블록을 만든다."""
+        try:
+            hits = search_knowledge(prompt)
+        except Exception as e:
+            logger.debug(f"지식 문서 검색 실패(무시): {e}")
+            return ""
+        if not hits:
+            return ""
+
+        lines = ["[지식 문서 검색 결과]"]
+        for idx, hit in enumerate(hits, 1):
+            lines.append(f"{idx}. ({hit['file']}) {hit['text']}")
+        lines.append(
+            "지침: 위 발췌는 선생님이 등록해 둔 지식 문서에서 질문과 관련된 부분입니다. "
+            "질문과 관련이 있으면 이 내용을 우선 근거로 답하고, 관련이 없으면 무시합니다."
+        )
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------ 웹 검색 (RAG)
+    def _decide_web_search_sync(self, prompt: str, history: List[Dict[str, str]]) -> Optional[str]:
+        """웹 검색이 필요한지 LLM으로 판단한다. 필요하면 검색어를, 아니면 None을 반환한다."""
+        recent = history[-4:]
+        lines = [
+            f"{'사용자' if m.get('role') == 'user' else '아리스'}: {m.get('content', '')}"
+            for m in recent
+        ]
+        user_content = (
+            (("[최근 대화]\n" + "\n".join(lines) + "\n\n") if lines else "")
+            + f"[마지막 사용자 메시지]\n{prompt}\n\n"
+            + f"[오늘 날짜] {date.today().isoformat()}\n\n"
+            + "웹 검색 필요 여부를 지시된 JSON 형식으로만 답하세요."
+        )
+        reply = ollama_chat_sync(
+            [{"role": "user", "content": user_content}],
+            system=WEB_SEARCH_DECISION_SYSTEM,
+            model=self.active_model,
+            temperature=0.1,
+            format_json=True,
+            keep_alive=LOCAL_AI_KEEP_ALIVE,
+            num_predict=WEB_SEARCH_DECISION_NUM_PREDICT,
+        )
+        data = extract_json_object(reply)
+        query = data.get("query")
+        if data.get("search") and isinstance(query, str) and query.strip():
+            return query.strip()[:150]
+        return None
+
+    async def _maybe_web_search(self, ctx, prompt: str, session: _ChatSession) -> str:
+        """검색이 필요한 메시지면 웹 검색을 수행하고 결과 컨텍스트 블록을 반환한다.
+
+        판단·검색 실패는 대화를 막지 않도록 빈 문자열로 조용히 처리한다.
+        """
+        if not LOCAL_AI_WEB_SEARCH_ENABLED:
+            return ""
+        if len(prompt.strip()) < WEB_SEARCH_MIN_PROMPT_CHARS:
+            return ""
+
+        try:
+            query = await asyncio.to_thread(
+                self._decide_web_search_sync, prompt, session.history
+            )
+        except Exception as e:
+            logger.debug(f"웹 검색 판단 실패(무시): {e}")
+            return ""
+        if not query:
+            return ""
+
+        display_query = query.replace("`", "'")
+        try:
+            await ctx.send(f"🔍 웹에서 '{display_query}' 검색 중...", delete_after=10)
+        except discord.HTTPException:
+            pass
+
+        try:
+            results = await asyncio.to_thread(
+                search_web, query, WEB_SEARCH_MAX_RESULTS, WEB_SEARCH_TIMEOUT_SECONDS
+            )
+        except Exception as e:
+            logger.warning(f"웹 검색 실패: {e}")
+            results = []
+
+        if not results:
+            return (
+                "[웹 검색 안내]\n"
+                f"'{query}' 웹 검색을 시도했지만 결과를 가져오지 못했습니다. "
+                "최신 정보가 필요한 질문이라면 확실하지 않다고 솔직하게 답하세요."
+            )
+        return self._build_web_context(query, results)
+
+    @staticmethod
+    def _build_web_context(query: str, results: List[Dict[str, str]]) -> str:
+        lines = [f"[웹 검색 결과] (검색어: {query} / 오늘 날짜: {date.today().isoformat()})"]
+        for idx, result in enumerate(results, 1):
+            line = f"{idx}. {result['title']}"
+            if result.get("snippet"):
+                line += f" — {result['snippet']}"
+            if result.get("url"):
+                line += f" (출처: {result['url']})"
+            lines.append(line)
+        lines.append(
+            "지침: 위 검색 결과를 근거로 최신 정보를 반영해 답합니다. 검색 결과와 기존 지식이 "
+            "충돌하면 검색 결과를 우선하되, 결과에 없는 내용은 아는 척하지 않습니다. "
+            "필요하면 답변 끝에 참고한 출처 URL 하나를 짧게 덧붙여도 됩니다."
+        )
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------ 대화 요약 (장기 기억)
     def _summarize_sync(self, old_summary: str, messages: List[Dict[str, str]]) -> str:
@@ -709,9 +946,17 @@ class ChatAI(commands.Cog):
 
             try:
                 async with safe_typing(ctx):
+                    trpg_context = await self._gather_trpg_context(
+                        ctx.guild, ctx.channel, ctx.author
+                    )
+                    knowledge_context = await asyncio.to_thread(
+                        self._gather_knowledge_context_sync, prompt
+                    )
+                    web_context = await self._maybe_web_search(ctx, prompt, session)
                     reply = await self._generate_ai_reply(
                         prompt, author_name,
                         history=session.history, summary=session.summary,
+                        extra_contexts=[trpg_context, knowledge_context, web_context],
                     )
             except Exception as e:
                 logger.error(f"AI 응답 생성 오류: {e}", exc_info=True)
@@ -851,6 +1096,17 @@ class ChatAI(commands.Cog):
         embed.add_field(name="온도", value=str(LOCAL_AI_TEMPERATURE), inline=True)
         embed.add_field(name="최대 프롬프트 길이", value=str(LOCAL_AI_MAX_PROMPT_CHARS), inline=True)
         embed.add_field(name="요청 타임아웃", value=f"{LOCAL_AI_TIMEOUT_SECONDS}초", inline=True)
+        embed.add_field(
+            name="웹 검색",
+            value="켜짐 (필요할 때 자동)" if LOCAL_AI_WEB_SEARCH_ENABLED else "꺼짐",
+            inline=True,
+        )
+        try:
+            stats = await asyncio.to_thread(knowledge_stats)
+            knowledge_value = f"{len(stats['files'])}개 문서 / {stats['chunks']}개 청크"
+        except Exception:
+            knowledge_value = "조회 실패"
+        embed.add_field(name="지식 문서", value=knowledge_value, inline=True)
         embed.add_field(name="전체 활성 세션", value=str(len(self._sessions)), inline=True)
         embed.add_field(name="이 채널 내 본인 세션", value=str(active_for_user), inline=True)
         embed.add_field(
@@ -862,6 +1118,37 @@ class ChatAI(commands.Cog):
             inline=False,
         )
         await ctx.send(embed=embed, delete_after=30)
+        await self.delete_command_message(ctx)
+
+    @commands.command(name="지식", aliases=["knowledge", "지식목록"])
+    async def knowledge_command(self, ctx):
+        """대화 AI가 참조하는 지식 문서(data/knowledge/) 상태를 확인합니다."""
+        try:
+            stats = await asyncio.to_thread(knowledge_stats)
+        except Exception as e:
+            logger.error(f"지식 문서 상태 조회 실패: {e}", exc_info=True)
+            await ctx.send("지식 문서 상태를 조회하지 못했어요.", delete_after=10)
+            return
+
+        embed = discord.Embed(
+            title="📚 지식 문서",
+            description=(
+                "`data/knowledge/` 폴더에 `.md` / `.txt` 파일을 넣으면 "
+                "아리스가 `!대화` 에서 관련 내용을 검색해 참고합니다.\n"
+                "파일을 추가·수정하면 다음 질문부터 자동으로 반영돼요."
+            ),
+            color=0x1ABC9C,
+        )
+        embed.add_field(name="폴더", value=f"`{stats['dir']}`", inline=False)
+        embed.add_field(name="문서 수", value=str(len(stats["files"])), inline=True)
+        embed.add_field(name="청크 수", value=str(stats["chunks"]), inline=True)
+        if stats["files"]:
+            shown = stats["files"][:10]
+            listing = "\n".join(f"- {name}" for name in shown)
+            if len(stats["files"]) > 10:
+                listing += f"\n... 외 {len(stats['files']) - 10}개"
+            embed.add_field(name="문서 목록", value=listing[:1024], inline=False)
+        await ctx.send(embed=embed, delete_after=60)
         await self.delete_command_message(ctx)
 
     # ------------------------------------------------------------------ Slash Commands
