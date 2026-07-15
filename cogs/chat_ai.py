@@ -24,7 +24,7 @@ from urllib import error, request
 import discord
 from discord.ext import commands
 
-from GameSystem.TRPGEngine import PartyAdventure, TRPGAdventure
+from GameSystem.TRPGEngine import PartyAdventure, TRPGAdventure, WorldAdventure
 from utils.config import (
     COMMAND_MESSAGE_DELETE_DELAY,
     LOCAL_AI_BASE_URL,
@@ -40,7 +40,7 @@ from utils.config import (
     WEB_SEARCH_TIMEOUT_SECONDS,
 )
 from utils.discord_utils import safe_defer, safe_typing
-from utils.file_utils import load_trpg_party_saves, load_trpg_saves
+from utils.file_utils import load_trpg_party_saves, load_trpg_saves, load_trpg_world_saves
 from utils.knowledge_utils import knowledge_stats, search_knowledge
 from utils.llm_utils import extract_json_object, ollama_chat_sync
 from utils.web_search import search_web
@@ -553,6 +553,83 @@ class ChatAI(commands.Cog):
         )
         return "\n".join(lines)
 
+    def _find_world_adventure_sync(self, guild_id: int, channel_id: int) -> Optional[dict]:
+        """디스크 세이브에서 이 채널의 자유 모험(공유 세계) 데이터를 찾는다."""
+        saves = load_trpg_world_saves()
+        data = saves.get(f"{guild_id}:{channel_id}")
+        return data if isinstance(data, dict) else None
+
+    async def _gather_world_context(self, guild_id: int, channel_id: int, user: discord.abc.User) -> str:
+        """이 채널의 자유 모험 세계에 사용자가 참가 중이면 컨텍스트 블록을 만든다."""
+        adv: Optional[WorldAdventure] = None
+        world_cog = self.bot.get_cog("TRPGWorld")
+        if world_cog is not None:
+            adv = getattr(world_cog, "worlds", {}).get((guild_id, channel_id))
+
+        if adv is None:
+            try:
+                data = await asyncio.to_thread(
+                    self._find_world_adventure_sync, guild_id, channel_id
+                )
+            except Exception as e:
+                logger.debug(f"자유 모험 세이브 조회 실패(무시): {e}")
+                data = None
+            if data:
+                try:
+                    adv = WorldAdventure.from_dict(data)
+                except Exception as e:
+                    logger.debug(f"자유 모험 세이브 해석 실패(무시): {e}")
+                    adv = None
+
+        if adv is None or not adv.is_playing or str(user.id) not in adv.members:
+            return ""
+        return self._build_world_trpg_context(adv, str(user.id))
+
+    @staticmethod
+    def _build_world_trpg_context(adv: WorldAdventure, user_id: str) -> str:
+        own = adv.members.get(user_id)
+        lines = [
+            "[선생님이 참가 중인 자유 모험(공유 세계) 정보]",
+            f"제목: {adv.title} ({adv.genre_label}, 누적 {adv.turn}번의 행동, 모험가 {len(adv.members)}명)",
+        ]
+        if adv.world:
+            lines.append(f"세계관: {adv.world[:700]}")
+        member_lines = []
+        for uid, member in adv.members.items():
+            char = member.character
+            mine = " ← 선생님의 캐릭터" if uid == user_id else ""
+            downed = " (쓰러짐)" if char.hp <= 0 else ""
+            race = f", {char.race}" if char.race else ""
+            member_lines.append(
+                f"- {char.name} ({char.job}{race}) HP {char.hp}/{char.max_hp}{downed}{mine}"
+            )
+        lines.append("모험가들:\n" + "\n".join(member_lines))
+        if own:
+            char = own.character
+            inventory = ", ".join(char.inventory) if char.inventory else "없음"
+            detail = f"선생님 캐릭터 상세: 능력치 {char.stats_line()} / 소지품: {inventory}"
+            if char.background:
+                detail += f" / 배경: {char.background[:150]}"
+            lines.append(detail)
+            quest = own.quest or "(다음 개인 퀘스트 대기 중)"
+            done = f" (지금까지 완수 {own.quests_done}개)" if own.quests_done else ""
+            lines.append(f"선생님의 개인 퀘스트: {quest}{done}")
+        if adv.combat is not None and adv.combat.alive_enemies():
+            enemy_lines = ", ".join(
+                f"{e.name} HP {e.hp}/{e.max_hp}" for e in adv.combat.alive_enemies()
+            )
+            lines.append(f"현재 전투 중인 적: {enemy_lines}")
+        if adv.log:
+            lines.append("지난 기록:\n" + "\n".join(f"- {entry}" for entry in adv.log[-6:]))
+        if adv.scene:
+            lines.append(f"현재 장면: {adv.scene[:300]}")
+        lines.append(
+            "지침: 선생님이 자유 모험·세계관·개인 퀘스트·다른 모험가에 대해 물으면 위 정보를 "
+            "근거로 정확하게 답합니다. 위 정보에 없는 설정은 지어내지 않으며, "
+            "모험과 무관한 대화에서는 이 정보를 굳이 언급하지 않습니다."
+        )
+        return "\n".join(lines)
+
     async def _gather_trpg_context(
         self,
         guild: Optional[discord.Guild],
@@ -561,7 +638,7 @@ class ChatAI(commands.Cog):
     ) -> str:
         """사용자의 진행 중(메모리) 또는 저장된(디스크) TRPG 모험을 찾아 컨텍스트 블록을 만든다.
 
-        이 채널의 파티 모험(본인 참가 중)을 우선 참조하고, 없으면 1인용 모험을 찾는다.
+        이 채널의 파티 모험 → 자유 모험(공유 세계) → 1인용 모험 순서로 참조한다.
         모험이 없으면 빈 문자열을 반환하며, 조회 실패는 대화를 막지 않도록 조용히 무시한다.
         """
         guild_id = guild.id if guild else 0
@@ -570,6 +647,10 @@ class ChatAI(commands.Cog):
         party_context = await self._gather_party_context(guild_id, channel_id, user)
         if party_context:
             return party_context
+
+        world_context = await self._gather_world_context(guild_id, channel_id, user)
+        if world_context:
+            return world_context
 
         adv: Optional[TRPGAdventure] = None
         trpg_cog = self.bot.get_cog("TRPG")
