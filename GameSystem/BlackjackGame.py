@@ -452,10 +452,9 @@ class BlackjackGame(commands.Cog):
         # 게임 데이터 정리
         try:
             del self.games[channel_id]
-            if channel_id in self.locks:
-                del self.locks[channel_id]
         except KeyError:
             logger.debug("블랙잭 종료 시 게임 데이터가 이미 삭제됨")
+        self.locks.pop(channel_id, None)
 
         if channel:
             try:
@@ -511,8 +510,6 @@ class BlackjackGame(commands.Cog):
 
             try:
                 del self.games[channel_id]
-                if channel_id in self.locks:
-                    del self.locks[channel_id]
             except KeyError:
                 logger.debug("블랙잭 취소 시 데이터가 이미 삭제됨")
 
@@ -520,6 +517,8 @@ class BlackjackGame(commands.Cog):
                 await ctx.send("🛑 블랙잭 게임이 취소되었습니다.", delete_after=10)
             except discord.HTTPException:
                 logger.exception("블랙잭 취소 메시지 전송 실패")
+
+        self.locks.pop(channel_id, None)
 
     @blackjack_game.error
     @start_blackjack_game.error

@@ -64,6 +64,17 @@ def test_json_추출은_코드펜스와_잡음을_복구():
         extract_json_object("JSON 없음")
 
 
+def test_손상된_세이브_갱신은_전체_덮어쓰기를_거부(tmp_path, monkeypatch):
+    from utils.file_utils import JsonStorageError, set_trpg_save
+
+    save_path = tmp_path / "trpg_saves.json"
+    save_path.write_text("{not valid json", encoding="utf-8")
+    monkeypatch.setattr("utils.file_utils.TRPG_SAVES_FILE", str(save_path))
+
+    with pytest.raises(JsonStorageError):
+        set_trpg_save("1:2:3", {"scene": "test"})
+
+
 @pytest.fixture
 def knowledge_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(ku, "KNOWLEDGE_DIR", tmp_path)

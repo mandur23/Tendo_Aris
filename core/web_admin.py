@@ -22,6 +22,7 @@ import logging
 import math
 import os
 import platform
+import re
 import secrets
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -36,6 +37,7 @@ except ImportError:  # psutil이 없어도 대시보드는 동작해야 한다
 
 from core.shutdown_handler import get_shutdown_event
 from utils import db_utils
+from utils.file_utils import atomic_write_text
 from utils.config import (
     BASE_DIR,
     FFMPEG_PATH,
@@ -56,6 +58,28 @@ logger = logging.getLogger(__name__)
 
 COOKIE_NAME = "aris_admin_session"
 SESSION_TTL_SECONDS = 12 * 3600
+_SAFE_MODEL_NAME_RE = re.compile(r"^[\w.\-/:]+$")
+
+
+def _safe_compare_password(provided: str, expected: str) -> bool:
+    """길이가 달라도 ValueError 없이 비밀번호를 비교합니다."""
+    if not expected:
+        return False
+    try:
+        return hmac.compare_digest(provided, expected)
+    except (TypeError, ValueError):
+        return False
+
+
+def _validate_model_name(model: str) -> Optional[str]:
+    """모델 이름에 개행·주입 문자가 없는지 검증합니다. 문제 시 오류 메시지를 반환."""
+    if not model or not model.strip():
+        return "model 값이 비어 있습니다."
+    if "\n" in model or "\r" in model or "=" in model:
+        return "model 값에 허용되지 않는 문자가 포함되어 있습니다."
+    if not _SAFE_MODEL_NAME_RE.match(model):
+        return "model 값 형식이 올바르지 않습니다."
+    return None
 
 
 LOGIN_HTML = """<!DOCTYPE html>
@@ -900,7 +924,7 @@ class WebAdmin:
     async def do_login(self, request: web.Request) -> web.Response:
         form = await request.post()
         password = str(form.get("password", ""))
-        if not WEB_ADMIN_PASSWORD or not hmac.compare_digest(password, WEB_ADMIN_PASSWORD):
+        if not WEB_ADMIN_PASSWORD or not _safe_compare_password(password, WEB_ADMIN_PASSWORD):
             await asyncio.sleep(0.5)  # 무차별 대입 완화
             body = LOGIN_HTML.replace(
                 "<!--ERROR-->", '<div class="error">비밀번호가 올바르지 않습니다.</div>'
@@ -1236,7 +1260,7 @@ class WebAdmin:
                 lines.append("")
             lines.append(f"LOCAL_AI_MODEL={model}")
 
-        env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        atomic_write_text(str(env_path), "\n".join(lines) + "\n")
 
     async def api_chat_set_model(self, request: web.Request) -> web.Response:
         chat_cog = self._chat_cog()
@@ -1249,13 +1273,19 @@ class WebAdmin:
             return web.json_response({"error": "잘못된 요청 본문입니다."}, status=400)
         model = str(data.get("model", "")).strip()
         persist = bool(data.get("persist", False))
-        if not model:
-            return web.json_response({"error": "model 값이 비어 있습니다."}, status=400)
+        model_err = _validate_model_name(model)
+        if model_err:
+            return web.json_response({"error": model_err}, status=400)
 
         installed = await asyncio.to_thread(chat_cog._fetch_installed_models_sync)
         if installed and model not in installed:
             return web.json_response(
                 {"error": f"설치되지 않은 모델입니다: {model}", "installed": installed},
+                status=400,
+            )
+        if persist and not installed:
+            return web.json_response(
+                {"error": "설치된 모델 목록을 확인할 수 없어 TOKEN.env 저장을 거부했습니다."},
                 status=400,
             )
 

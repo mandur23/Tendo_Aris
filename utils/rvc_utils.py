@@ -6,6 +6,8 @@ import asyncio
 import os
 from concurrent.futures import ThreadPoolExecutor
 
+from utils.file_utils import atomic_write_json
+
 logger = logging.getLogger(__name__)
 
 # FFmpeg 경로 설정 (tts-with-rvc가 찾을 수 있도록)
@@ -165,9 +167,7 @@ def load_rvc_models():
 def save_rvc_models(rvc_models: dict):
     """RVC 모델 목록을 파일에 저장합니다."""
     try:
-        import json
-        with open(RVC_MODELS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(rvc_models, f, ensure_ascii=False, indent=4)
+        atomic_write_json(RVC_MODELS_FILE, rvc_models)
         logger.info(f"RVC 모델 저장 완료: {len(rvc_models)}개 모델")
     except Exception as e:
         logger.error(f"RVC 모델 저장 실패: {e}")

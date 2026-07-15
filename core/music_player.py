@@ -1,10 +1,11 @@
 import asyncio
 import random
 import logging
+import time
 import discord
 from discord.ui import Button, View
 from async_timeout import timeout
-from utils.ytdl_utils import create_ytdl_instance, ffmpeg_path, ffmpeg_options
+from utils.ytdl_utils import create_ytdl_instance, ffmpeg_path, ffmpeg_options, flatten_ytdl_info
 from utils.config import IDLE_TIMEOUT, DEFAULT_VOLUME, MAX_RETRIES, BASE_DELAY, MAX_PLAY_RETRIES, QUEUE_TIMEOUT
 from utils.discord_utils import safe_send, safe_delete_message, retry_on_403_error
 
@@ -37,8 +38,9 @@ class MusicPlayer:
         self.paused_at_time = None  # 일시정지된 시점 (시간)
 
         self.idle_timeout = IDLE_TIMEOUT
-        self.last_activity = asyncio.Event()
-        self.inactive_time = 0
+        self._last_activity_at = time.monotonic()
+        self._suppress_play_after = False
+        self._suspended_for_tts = False
 
         self.random_play = False
         self.voice_channel = (
@@ -65,19 +67,73 @@ class MusicPlayer:
             return False
         return (self.guild.voice_client and (self.guild.voice_client.is_playing() or self.guild.voice_client.is_paused())) or not self.queue.empty()
 
+    def _touch_activity(self) -> None:
+        """비활동 타임아웃 카운터를 리셋합니다."""
+        self._last_activity_at = time.monotonic()
+
+    def _on_playback_after(self, error) -> None:
+        """음악 FFmpeg 재생 종료 콜백. TTS 중단 시에는 큐를 진행하지 않습니다."""
+        if error:
+            logger.error(f"음악 재생 오류: {error}")
+        if self._suppress_play_after:
+            self._suppress_play_after = False
+            return
+        self.bot.loop.call_soon_threadsafe(self.next.set)
+
+    def _is_actively_busy(self) -> bool:
+        """재생·대기·TTS 중이면 True — idle 타임아웃을 적용하지 않습니다."""
+        vc = self.guild.voice_client
+        if vc and (vc.is_playing() or vc.is_paused()):
+            return True
+        if not self.queue.empty():
+            return True
+        tts_cog = self.bot.get_cog("TTS")
+        if tts_cog:
+            if tts_cog.playing.get(self.guild.id):
+                return True
+            queue = getattr(tts_cog, "tts_queue", {})
+            if queue.get(self.guild.id):
+                return True
+        return False
+
+    def suspend_for_tts(self) -> bool:
+        """TTS 재생을 위해 현재 FFmpeg를 정리하고 재생 위치만 보존합니다."""
+        vc = self.guild.voice_client
+        if not vc or not self.current:
+            return False
+        if not (vc.is_playing() or vc.is_paused()):
+            return False
+
+        now = time.time()
+        if vc.is_playing() and self.playback_start_time and self.paused_at_time is None:
+            self.paused_at_position = max(0, now - self.playback_start_time)
+        elif self.last_position_update and self.paused_at_time is None:
+            self.paused_at_position = max(
+                0, self.paused_at_position + (now - self.last_position_update)
+            )
+
+        self.paused_at_time = now
+        self._suspended_for_tts = True
+        self._suppress_play_after = True
+        try:
+            vc.stop()
+        except Exception as e:
+            logger.debug(f"TTS를 위한 음악 stop 중 오류 (무시됨): {e}")
+        self._touch_activity()
+        return True
+
     async def check_idle_timeout(self):
         while not self._shutdown and not self.bot.is_closed():
             try:
                 await asyncio.sleep(1)
                 if self._shutdown:
                     break
-                if not self.last_activity.is_set():
-                    self.inactive_time += 1
-                    if self.inactive_time >= self.idle_timeout:
-                        logger.info(f"비활동 시간 {self.idle_timeout}초 초과. 재생을 중지합니다.")
-                        await self.stop()
-                else:
-                    self.inactive_time = 0
+                if self._is_actively_busy():
+                    self._touch_activity()
+                    continue
+                if time.monotonic() - self._last_activity_at >= self.idle_timeout:
+                    logger.info(f"비활동 시간 {self.idle_timeout}초 초과. 재생을 중지합니다.")
+                    await self.stop()
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -203,7 +259,7 @@ class MusicPlayer:
             if member.guild.id != self.guild.id:
                 return
 
-            self.last_activity.set()
+            self._touch_activity()
             
             # voice_client가 없으면 무시
             if not self.guild.voice_client:
@@ -270,6 +326,14 @@ class MusicPlayer:
                     logger.debug(f"재개 중 오류 (무시됨): {e}")
                 return
 
+            # TTS 재생 중이면 빈 채널 퇴장 처리를 보류한다.
+            tts_cog = self.bot.get_cog("TTS")
+            if tts_cog:
+                tts_queue = getattr(tts_cog, "tts_queue", {})
+                tts_playing = getattr(tts_cog, "playing", {})
+                if tts_playing.get(self.guild.id) or tts_queue.get(self.guild.id):
+                    return
+
             await self.stop()
 
             try:
@@ -303,7 +367,7 @@ class MusicPlayer:
 
         while not self._shutdown and not self.bot.is_closed():
             self.next.clear()
-            self.last_activity.set()
+            self._touch_activity()
 
             await self.delete_messages()
             
@@ -364,6 +428,11 @@ class MusicPlayer:
                         await safe_send(self.channel, f'어머나, {MAX_RETRIES}번 시도했지만 노래를 불러올 수 없어요: {str(e)[:100]}...', delete_after=10)
                     continue
 
+            source = flatten_ytdl_info(source)
+            if not source or not source.get("url"):
+                await safe_send(self.channel, '어머나, 재생할 수 있는 곡 정보를 찾지 못했어요.', delete_after=10)
+                continue
+
             self.current = source
             
             try:
@@ -401,7 +470,7 @@ class MusicPlayer:
                             discord.FFmpegPCMAudio(source['url'], executable=ffmpeg_path,
                                                    before_options=ffmpeg_options['before_options'],
                                                    options=ffmpeg_options['options']),
-                            after=lambda _: self.bot.loop.call_soon_threadsafe(self.next.set)
+                            after=self._on_playback_after
                         )
                         self.guild.voice_client.source = discord.PCMVolumeTransformer(self.guild.voice_client.source)
                         self.guild.voice_client.source.volume = self.volume
@@ -765,11 +834,12 @@ class MusicPlayer:
                 discord.FFmpegPCMAudio(source['url'], executable=ffmpeg_path,
                                        before_options=before_opts,
                                        options=ffmpeg_options['options']),
-                after=lambda _: self.bot.loop.call_soon_threadsafe(self.next.set)
+                after=self._on_playback_after
             )
             self.guild.voice_client.source = discord.PCMVolumeTransformer(self.guild.voice_client.source)
             self.guild.voice_client.source.volume = self.volume
-            
+            self._suspended_for_tts = False
+
             logger.debug(f"음악 재생 재개: {source.get('title', '알 수 없음')} ({resume_position}초부터)")
             return True
         except Exception as e:

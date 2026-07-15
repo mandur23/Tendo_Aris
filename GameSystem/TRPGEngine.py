@@ -7,6 +7,7 @@
 모든 LLM 호출 함수는 동기(blocking)이며, 호출부에서 asyncio.to_thread 로 감싸야 한다.
 """
 import logging
+import copy
 import random
 import re
 from dataclasses import dataclass, field
@@ -299,14 +300,14 @@ class Enemy:
 
     @classmethod
     def from_dict(cls, data: dict) -> "Enemy":
-        max_hp = int(data.get("max_hp", 1))
+        max_hp = max(1, min(200, int(data.get("max_hp", 1))))
         return cls(
             name=data.get("name", "적"),
             hp=max(0, min(max_hp, int(data.get("hp", 1)))),
             max_hp=max_hp,
-            ac=int(data.get("ac", 12)),
-            attack=int(data.get("attack", 2)),
-            damage=data.get("damage", ENEMY_DAMAGE_FALLBACK),
+            ac=max(5, min(25, int(data.get("ac", 12)))),
+            attack=max(-2, min(10, int(data.get("attack", 2)))),
+            damage=_normalize_enemy_damage(data.get("damage")),
         )
 
 
@@ -1337,12 +1338,6 @@ def _normalize_party_hp_changes(raw, members: Dict[str, TRPGCharacter]) -> Dict[
         name = name.strip()
         uid = name_to_uid.get(name)
         if uid is None:
-            # 호칭이 덧붙는 경우("전사 알렉스" 등)를 대비한 부분 일치
-            uid = next(
-                (u for n, u in name_to_uid.items() if n and (n in name or name in n)),
-                None,
-            )
-        if uid is None:
             continue
         delta = _normalize_hp_change(item.get("change"))
         if delta:
@@ -2065,3 +2060,48 @@ def play_world_action(
         quest_completed=quest_completed,
         combat_log=combat_log,
     )
+
+
+# ------------------------------------------------------------------ 스레드 안전 턴 실행
+# asyncio.to_thread 로 LLM 턴을 돌릴 때 공유 adv 객체가 동시에 읽히지 않도록
+# deepcopy → 처리 → 갱신된 복사본 반환 패턴을 사용한다.
+
+def run_solo_turn(
+    adv: TRPGAdventure,
+    action_text: str,
+    check: Optional[CheckResult],
+    *,
+    choice: Optional[dict] = None,
+    model: Optional[str] = None,
+) -> tuple[TRPGAdventure, TurnResult]:
+    working = copy.deepcopy(adv)
+    result = play_turn(working, action_text, check, choice=choice, model=model)
+    return working, result
+
+
+def run_party_turn(
+    adv: PartyAdventure,
+    actor_id: str,
+    action_text: str,
+    check: Optional[CheckResult],
+    *,
+    choice: Optional[dict] = None,
+    model: Optional[str] = None,
+) -> tuple[PartyAdventure, PartyTurnResult]:
+    working = copy.deepcopy(adv)
+    result = play_party_turn(working, actor_id, action_text, check, choice=choice, model=model)
+    return working, result
+
+
+def run_world_turn(
+    adv: WorldAdventure,
+    actor_id: str,
+    action_text: str,
+    check: Optional[CheckResult],
+    *,
+    choice: Optional[dict] = None,
+    model: Optional[str] = None,
+) -> tuple[WorldAdventure, WorldActionResult]:
+    working = copy.deepcopy(adv)
+    result = play_world_action(working, actor_id, action_text, check, choice=choice, model=model)
+    return working, result

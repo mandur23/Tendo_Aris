@@ -85,3 +85,14 @@ def create_ytdl_instance(custom_options=None):
     
     return yt_dlp.YoutubeDL(options)
 
+
+def flatten_ytdl_info(info):
+    """yt-dlp 검색/플레이리스트 결과에서 첫 유효 항목을 단일 영상 dict 로 평탄화합니다."""
+    if not info:
+        return None
+    if "entries" in info:
+        for entry in info.get("entries") or []:
+            if entry:
+                return entry
+        return None
+    return info

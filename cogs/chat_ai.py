@@ -969,17 +969,16 @@ class ChatAI(commands.Cog):
                 pass
 
         try:
-            await tts_cog.play_tts(
-                ctx,
-                tts_text,
-                session.tts_lang,
-                session.tts_voice_model,
-                session.tts_slow,
-                session.tts_use_rvc,
-                session.tts_rvc_model,
-                session.tts_use_supertonic,
-                session.tts_supertonic_voice,
-            )
+            settings = {
+                'lang': session.tts_lang,
+                'voice_model': session.tts_voice_model,
+                'slow': session.tts_slow,
+                'use_rvc': session.tts_use_rvc,
+                'rvc_model': session.tts_rvc_model,
+                'use_supertonic': session.tts_use_supertonic,
+                'supertonic_voice': session.tts_supertonic_voice,
+            }
+            await tts_cog.enqueue_tts(ctx.guild, ctx.author.id, tts_text, settings)
         except Exception as e:
             logger.warning(f"TTS 재생 실패: {e}")
 

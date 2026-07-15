@@ -33,13 +33,13 @@ from GameSystem.TRPGEngine import (
     generate_world_join,
     generate_world_quest,
     generate_world_scenario,
-    play_world_action,
+    run_world_turn,
     roll_check,
 )
 from cogs.trpg_ui import CharacterSetupModal, combat_status_lines, hp_bar as _hp_bar
 from utils.config import LOCAL_AI_MODEL
 from utils.discord_utils import AuthorLockedView, safe_defer, safe_edit_message
-from utils.file_utils import load_trpg_world_saves, save_trpg_world_saves
+from utils.file_utils import delete_trpg_world_save, load_trpg_world_saves, set_trpg_world_save
 from utils.llm_utils import check_model_available, is_local_ai_configured
 
 logger = logging.getLogger(__name__)
@@ -305,14 +305,10 @@ class TRPGWorld(commands.Cog):
 
     # ------------------------------------------------------------------ 세이브 관리
     def _save_sync(self, key: WorldKey, adv_dict: dict):
-        saves = load_trpg_world_saves()
-        saves[self._key_str(key)] = adv_dict
-        save_trpg_world_saves(saves)
+        set_trpg_world_save(self._key_str(key), adv_dict)
 
     def _delete_save_sync(self, key: WorldKey):
-        saves = load_trpg_world_saves()
-        if saves.pop(self._key_str(key), None) is not None:
-            save_trpg_world_saves(saves)
+        delete_trpg_world_save(self._key_str(key))
 
     def _load_save_sync(self, key: WorldKey) -> Optional[dict]:
         return load_trpg_world_saves().get(self._key_str(key))
@@ -742,9 +738,10 @@ class TRPGWorld(commands.Cog):
 
             try:
                 async with channel.typing():
-                    result = await asyncio.to_thread(
-                        play_world_action, adv, actor_id, action_text, check, choice=choice, model=self._model()
+                    adv, result = await asyncio.to_thread(
+                        run_world_turn, adv, actor_id, action_text, check, choice=choice, model=self._model()
                     )
+                    self.worlds[key] = adv
             except Exception as e:
                 logger.error(f"자유 모험 행동 처리 실패: {e}", exc_info=True)
                 try:
@@ -908,6 +905,12 @@ class TRPGWorld(commands.Cog):
     @commands.command(name="자유모험상태", aliases=["월드상태", "자유상태"], help="자유 모험 세계의 모험가 시트를 확인합니다.")
     async def world_status(self, ctx):
         key = self._make_key(ctx.guild, ctx.channel)
+        if key in self.worlds:
+            async with self._lock(key):
+                adv = self.worlds.get(key)
+                if adv is not None:
+                    await ctx.send(embed=self.world_sheet_embed(adv), delete_after=60)
+                    return
         adv = await self._get_or_load_world(key)
         if adv is None:
             await ctx.send("이 채널에 진행 중인 세계가 없어요. `!자유모험` 으로 시작해주세요!", delete_after=15)

@@ -24,14 +24,14 @@ from GameSystem.TRPGEngine import (
     TRPGCharacter,
     TurnResult,
     generate_scenario,
-    play_turn,
+    run_solo_turn,
     roll_check,
     roll_dice,
 )
 from cogs.trpg_ui import CharacterSetupModal, combat_status_lines, hp_bar as _hp_bar
 from utils.config import LOCAL_AI_MODEL
 from utils.discord_utils import AuthorLockedView, safe_defer, safe_edit_message
-from utils.file_utils import load_trpg_saves, save_trpg_saves
+from utils.file_utils import delete_trpg_save, load_trpg_saves, set_trpg_save
 from utils.llm_utils import check_model_available, is_local_ai_configured
 
 logger = logging.getLogger(__name__)
@@ -231,14 +231,10 @@ class TRPG(commands.Cog):
 
     # ------------------------------------------------------------------ 세이브 관리
     def _save_sync(self, key: SessionKey, adv_dict: dict):
-        saves = load_trpg_saves()
-        saves[self._key_str(key)] = adv_dict
-        save_trpg_saves(saves)
+        set_trpg_save(self._key_str(key), adv_dict)
 
     def _delete_save_sync(self, key: SessionKey):
-        saves = load_trpg_saves()
-        if saves.pop(self._key_str(key), None) is not None:
-            save_trpg_saves(saves)
+        delete_trpg_save(self._key_str(key))
 
     def _load_save_sync(self, key: SessionKey) -> Optional[dict]:
         return load_trpg_saves().get(self._key_str(key))
@@ -527,9 +523,10 @@ class TRPG(commands.Cog):
 
             try:
                 async with channel.typing():
-                    result = await asyncio.to_thread(
-                        play_turn, adv, action_text, check, choice=choice, model=self._model()
+                    adv, result = await asyncio.to_thread(
+                        run_solo_turn, adv, action_text, check, choice=choice, model=self._model()
                     )
+                    self.adventures[key] = adv
             except Exception as e:
                 logger.error(f"TRPG 턴 처리 실패: {e}", exc_info=True)
                 try:
@@ -681,7 +678,13 @@ class TRPG(commands.Cog):
     @commands.command(name="모험상태", aliases=["trpg상태"], help="진행 중인 TRPG 캐릭터 상태를 확인합니다.")
     async def trpg_status(self, ctx):
         key = self._make_key(ctx.guild, ctx.channel, ctx.author)
-        adv = self.adventures.get(key)
+        adv = None
+        if key in self.adventures:
+            async with self._lock(key):
+                adv = self.adventures.get(key)
+                if adv is not None:
+                    await ctx.send(embed=self.character_embed(adv), delete_after=60)
+                    return
         if adv is None:
             data = await asyncio.to_thread(self._load_save_sync, key)
             if data:

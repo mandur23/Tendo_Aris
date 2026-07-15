@@ -30,13 +30,13 @@ from GameSystem.TRPGEngine import (
     PartyTurnResult,
     TRPGCharacter,
     generate_party_scenario,
-    play_party_turn,
+    run_party_turn,
     roll_check,
 )
 from cogs.trpg_ui import CharacterSetupModal, combat_status_lines, hp_bar as _hp_bar
 from utils.config import LOCAL_AI_MODEL
 from utils.discord_utils import AuthorLockedView, safe_defer, safe_edit_message
-from utils.file_utils import load_trpg_party_saves, save_trpg_party_saves
+from utils.file_utils import delete_trpg_party_save, load_trpg_party_saves, set_trpg_party_save
 from utils.llm_utils import check_model_available, is_local_ai_configured
 
 logger = logging.getLogger(__name__)
@@ -148,6 +148,7 @@ class PartyLobbyView(discord.ui.View):
             return
         self.lobby.members.pop(interaction.user.id, None)
         self.lobby.names.pop(interaction.user.id, None)
+        self.lobby.profiles.pop(interaction.user.id, None)
         await self.cog.update_lobby_message(interaction, self.key)
 
     async def _start_cb(self, interaction: discord.Interaction):
@@ -357,14 +358,10 @@ class TRPGParty(commands.Cog):
 
     # ------------------------------------------------------------------ 세이브 관리
     def _save_sync(self, key: PartyKey, adv_dict: dict):
-        saves = load_trpg_party_saves()
-        saves[self._key_str(key)] = adv_dict
-        save_trpg_party_saves(saves)
+        set_trpg_party_save(self._key_str(key), adv_dict)
 
     def _delete_save_sync(self, key: PartyKey):
-        saves = load_trpg_party_saves()
-        if saves.pop(self._key_str(key), None) is not None:
-            save_trpg_party_saves(saves)
+        delete_trpg_party_save(self._key_str(key))
 
     def _load_save_sync(self, key: PartyKey) -> Optional[dict]:
         return load_trpg_party_saves().get(self._key_str(key))
@@ -755,9 +752,10 @@ class TRPGParty(commands.Cog):
 
             try:
                 async with channel.typing():
-                    result = await asyncio.to_thread(
-                        play_party_turn, adv, actor_id, action_text, check, choice=choice, model=self._model()
+                    adv, result = await asyncio.to_thread(
+                        run_party_turn, adv, actor_id, action_text, check, choice=choice, model=self._model()
                     )
+                    self.parties[key] = adv
             except Exception as e:
                 logger.error(f"파티 TRPG 턴 처리 실패: {e}", exc_info=True)
                 try:
@@ -944,14 +942,19 @@ class TRPGParty(commands.Cog):
     @commands.command(name="파티모험상태", aliases=["파티상태"], help="진행 중인 파티 TRPG 상태를 확인합니다.")
     async def party_status(self, ctx):
         key = self._make_key(ctx.guild, ctx.channel)
-        adv = self.parties.get(key)
-        if adv is None:
-            data = await asyncio.to_thread(self._load_save_sync, key)
-            if data:
-                try:
-                    adv = PartyAdventure.from_dict(data)
-                except Exception:
-                    adv = None
+        if key in self.parties:
+            async with self._lock(key):
+                adv = self.parties.get(key)
+                if adv is not None:
+                    await ctx.send(embed=self.party_sheet_embed(adv), delete_after=60)
+                    return
+        adv = None
+        data = await asyncio.to_thread(self._load_save_sync, key)
+        if data:
+            try:
+                adv = PartyAdventure.from_dict(data)
+            except Exception:
+                adv = None
         if adv is None:
             await ctx.send("이 채널에 진행 중인 파티 모험이 없어요. `!파티모험` 으로 시작해주세요!", delete_after=15)
             return

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import threading
 import time
 import discord
 from discord.ext import commands
@@ -28,6 +29,7 @@ class Music(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.players = {}
+        self._player_locks: dict[int, threading.Lock] = {}
         self.playlists = {} if USE_MYSQL else load_playlists()
         self.history = {} if USE_MYSQL else load_history()
         ensure_logs_dir()
@@ -110,13 +112,19 @@ class Music(commands.Cog):
         except KeyError:
             pass
 
+    def _get_player_lock(self, guild_id: int) -> threading.Lock:
+        if guild_id not in self._player_locks:
+            self._player_locks[guild_id] = threading.Lock()
+        return self._player_locks[guild_id]
+
     def get_player(self, ctx):
-        if ctx.guild.id in self.players:
-            player = self.players[ctx.guild.id]
-        else:
-            player = MusicPlayer(ctx)
-            self.players[ctx.guild.id] = player
-        
+        with self._get_player_lock(ctx.guild.id):
+            if ctx.guild.id in self.players:
+                player = self.players[ctx.guild.id]
+            else:
+                player = MusicPlayer(ctx)
+                self.players[ctx.guild.id] = player
+
         player.update_voice_channel_from_context(ctx)
         return player
 

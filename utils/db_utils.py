@@ -397,31 +397,34 @@ async def save_playlist_to_db(guild_id: int, playlist_id: str, urls: List[str]):
     """특정 플레이리스트를 데이터베이스에 저장합니다."""
     if not USE_MYSQL:
         return
-    
+
     try:
         pool = await get_pool()
         async with pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                # 기존 플레이리스트 삭제
-                await cur.execute(
-                    "DELETE FROM playlists WHERE guild_id = %s AND playlist_id = %s",
-                    (guild_id, playlist_id)
-                )
-                
-                # 새 플레이리스트 삽입
-                if urls:  # 빈 리스트가 아닌 경우만
-                    for position, url in enumerate(urls):
-                        await cur.execute("""
-                            INSERT INTO playlists (guild_id, playlist_id, url, position)
-                            VALUES (%s, %s, %s, %s)
-                        """, (
-                            guild_id,
-                            playlist_id,
-                            url[:500],
-                            position
-                        ))
-                
+            await conn.begin()
+            try:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "DELETE FROM playlists WHERE guild_id = %s AND playlist_id = %s",
+                        (guild_id, playlist_id)
+                    )
+
+                    if urls:
+                        for position, url in enumerate(urls):
+                            await cur.execute("""
+                                INSERT INTO playlists (guild_id, playlist_id, url, position)
+                                VALUES (%s, %s, %s, %s)
+                            """, (
+                                guild_id,
+                                playlist_id,
+                                url[:500],
+                                position
+                            ))
+
                 await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
     except Exception as e:
         logger.error(f"플레이리스트 저장 중 오류: {e}")
 

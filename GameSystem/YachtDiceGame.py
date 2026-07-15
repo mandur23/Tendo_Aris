@@ -738,10 +738,9 @@ class YachtDiceGame(commands.Cog):
 
         try:
             del self.games[channel_id]
-            if channel_id in self.locks:
-                del self.locks[channel_id]
         except KeyError:
             logger.debug("종료 시 게임 데이터가 이미 삭제됨")
+        self.locks.pop(channel_id, None)
 
         channel = self.bot.get_channel(channel_id)
         if channel is None and guild:
@@ -766,14 +765,13 @@ class YachtDiceGame(commands.Cog):
                 await ctx.send("진행 중인 게임이 없습니다.")
                 return
 
-            if ctx.author.id != game['players'][0] and not ctx.author.guild_permissions.manage_messages:
+            can_manage = getattr(ctx.author, "guild_permissions", None) and ctx.author.guild_permissions.manage_messages
+            if ctx.author.id != game['players'][0] and not can_manage:
                 await ctx.send("게임을 취소할 권한이 없습니다.", delete_after=10)
                 return
 
             try:
                 del self.games[channel_id]
-                if channel_id in self.locks:
-                    del self.locks[channel_id]
             except KeyError:
                 logger.debug("취소 시 데이터가 이미 삭제됨")
 
@@ -781,6 +779,8 @@ class YachtDiceGame(commands.Cog):
                 await ctx.send("🛑 야추 게임이 취소되었습니다.", delete_after=10)
             except discord.HTTPException:
                 logger.exception("게임 취소 메시지 전송 실패")
+
+        self.locks.pop(channel_id, None)
 
     @yacht_game.error
     @start_yacht_game.error

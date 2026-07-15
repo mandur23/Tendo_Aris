@@ -37,7 +37,8 @@ def test_턴진행_HP이름매칭_아이템_턴순환(gm, scenario_reply):
         "choices": [{"text": "후퇴한다", "stat": "민첩", "dc": 12}],
         "hp_changes": [
             {"name": "알파", "change": -8},
-            {"name": "도적 감마", "change": -2},   # 부분 일치 매칭
+            {"name": "감마", "change": -2},        # 정확한 이름만 매칭
+            {"name": "도적 감마", "change": -2},   # 부분 일치는 무시
             {"name": "없는사람", "change": -5},    # 무시
         ],
         "items_add": ["이상한 열쇠"],

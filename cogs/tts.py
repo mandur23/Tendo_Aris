@@ -21,6 +21,7 @@ from utils.supertonic_utils import (
 )
 
 logger = logging.getLogger(__name__)
+TTS_QUEUE_MAX = 20
 
 # TTS 읽기 전처리용 정규식
 _URL_RE = re.compile(r'https?://\S+')
@@ -38,8 +39,33 @@ class TTS(commands.Cog):
         self.tts_queue = {}
         # 재생 중인지 확인 (guild_id -> bool)
         self.playing = {}
+        # TTS 재생 직렬화 락 (guild_id -> asyncio.Lock)
+        self._playback_locks = {}
         # 음성 연결 경합 방지 락 (guild_id -> asyncio.Lock)
         self._voice_connect_locks = {}
+
+    def _get_playback_lock(self, guild_id: int) -> asyncio.Lock:
+        if guild_id not in self._playback_locks:
+            self._playback_locks[guild_id] = asyncio.Lock()
+        return self._playback_locks[guild_id]
+
+    async def enqueue_tts(self, guild, user_id: int, text: str, settings: dict) -> bool:
+        """TTS를 길드 대기열에 추가하고, 재생 중이 아니면 처리를 시작합니다."""
+        text = (text or "").strip()
+        if not text or len(text) > 200:
+            return False
+
+        if guild.id not in self.tts_queue:
+            self.tts_queue[guild.id] = []
+        if len(self.tts_queue[guild.id]) >= TTS_QUEUE_MAX:
+            logger.warning(f"TTS 대기열 상한 초과 (guild={guild.id})")
+            return False
+
+        self.tts_queue[guild.id].append((user_id, text, settings))
+        async with self._get_playback_lock(guild.id):
+            if not self.playing.get(guild.id, False):
+                asyncio.create_task(self._process_queue(guild))
+        return True
 
     def _get_voice_connect_lock(self, guild_id: int) -> asyncio.Lock:
         """길드별 음성 연결 락을 반환합니다."""
@@ -113,6 +139,7 @@ class TTS(commands.Cog):
         volume_lowered = False
         music_was_playing = False
         music_was_paused = False
+        playback_started = False
         try:
             # 텍스트 유효성 검사
             if not text or not text.strip():
@@ -194,127 +221,88 @@ class TTS(commands.Cog):
                     lambda: text_to_speech(text, lang=lang, slow=slow, tld=tld)
                 )
             
-            # 음악 재생 중이면 일시정지
-            music_cog = self.bot.get_cog('Music')
-
-            if ctx.voice_client.is_playing() and music_cog:
-                guild_id = ctx.guild.id if hasattr(ctx, 'guild') else None
-                if guild_id and guild_id in music_cog.players:
-                    music_player = music_cog.players[guild_id]
-                    music_was_playing = True
-                    # 음악 일시정지 및 재생 위치 저장
-                    if ctx.voice_client.is_playing():
-                        # 재생 위치 계산
-                        import time
-                        current_time = time.time()
-                        
-                        if music_player.playback_start_time:
-                            # 재생 시작 시간이 있으면 정확한 위치 계산
-                            elapsed = current_time - music_player.playback_start_time
-                            music_player.paused_at_position = max(0, elapsed)
-                            logger.debug(f"음악 일시정지 위치: {elapsed:.2f}초 (정확한 추적)")
-                        elif music_player.last_position_update:
-                            # 재생 시작 시간은 없지만 마지막 위치 업데이트가 있으면
-                            # 마지막 업데이트 이후 경과 시간을 더해서 계산
-                            time_since_update = current_time - music_player.last_position_update
-                            estimated_position = music_player.paused_at_position + time_since_update
-                            music_player.paused_at_position = max(0, estimated_position)
-                            # 재생 시작 시간을 역산하여 설정
-                            music_player.playback_start_time = current_time - music_player.paused_at_position
-                            logger.debug(f"음악 일시정지 위치: {estimated_position:.2f}초 (추정, 마지막 업데이트 기준)")
-                        else:
-                            # 재생 시작 시간도 없고 마지막 업데이트도 없으면 (첫 TTS 호출)
-                            # 현재 paused_at_position을 유지 (이미 추적 태스크에서 업데이트되었을 수 있음)
-                            if music_player.paused_at_position > 0:
-                                # 이미 위치가 있으면 그대로 사용
-                                music_player.playback_start_time = current_time - music_player.paused_at_position
-                                logger.debug(f"음악 일시정지 위치: {music_player.paused_at_position:.2f}초 (추적 태스크에서 업데이트됨)")
-                            else:
-                                # 위치가 없으면 현재 시간 기준으로 설정 (다음 TTS부터는 연속 재생)
-                                music_player.playback_start_time = current_time
-                                music_player.paused_at_position = 0
-                                logger.debug("재생 시작 시간이 없어서 현재 시간으로 설정 (첫 TTS 호출, 위치는 0으로 유지)")
-                        
-                        # 일시정지 시점 저장 (TTS 재생 중 위치 추적 중지용)
-                        music_player.paused_at_time = current_time
-                        ctx.voice_client.pause()
-                        music_was_paused = True
-                        logger.debug(f"음악 일시정지 완료 (위치: {music_player.paused_at_position:.2f}초)")
-            
-            # FFmpeg 경로 설정 (None이거나 빈 문자열이면 기본값 사용)
+            # FFmpeg / 파일 검증 — 음악 pause 전에 수행해 실패 시 음악이 멈춘 채 남지 않게 한다.
             ffmpeg_executable = FFMPEG_PATH if FFMPEG_PATH and Path(FFMPEG_PATH).exists() else None
             if not ffmpeg_executable:
-                # 시스템 PATH에서 ffmpeg 찾기
                 import shutil
                 ffmpeg_executable = shutil.which('ffmpeg')
-            
+
             if not ffmpeg_executable:
                 logger.error("FFmpeg를 찾을 수 없습니다. FFMPEG_PATH를 설정하거나 시스템 PATH에 ffmpeg를 추가해주세요.")
                 cleanup_tts_file(tts_file)
                 return False
-            
-            # 파일 존재 확인
+
             if not tts_file.exists():
                 logger.error(f"TTS 파일이 존재하지 않습니다: {tts_file}")
                 cleanup_tts_file(tts_file)
                 return False
-            
-            # 파일 크기 확인
+
             file_size = tts_file.stat().st_size
             if file_size == 0:
                 logger.error(f"TTS 파일이 비어있습니다: {tts_file} (크기: {file_size} bytes)")
                 cleanup_tts_file(tts_file)
                 return False
-            
+
             logger.debug(f"TTS 파일 재생 준비: {tts_file} (크기: {file_size} bytes)")
-            
-            # FFmpeg 옵션 (로컬 파일이므로 간단한 옵션만 사용)
-            # before_options는 로컬 파일에는 필요 없음
-            options = '-vn'  # 비디오 없음, 오디오만
-            
+
+            # 음악 재생 중이면 FFmpeg를 정리하고 위치만 보존 (pause+play 교체 누수 방지)
+            music_cog = self.bot.get_cog('Music')
+            if music_cog and ctx.voice_client:
+                guild_id = ctx.guild.id if hasattr(ctx, 'guild') else None
+                if guild_id and guild_id in music_cog.players:
+                    music_player = music_cog.players[guild_id]
+                    if music_player.suspend_for_tts():
+                        music_was_playing = True
+                        music_was_paused = True
+                        logger.debug(
+                            f"음악 suspend_for_tts 완료 (위치: {music_player.paused_at_position:.2f}초)"
+                        )
+
+            options = '-vn'
+
             source = discord.FFmpegPCMAudio(
-                str(tts_file), 
+                str(tts_file),
                 executable=ffmpeg_executable,
                 options=options
             )
-            
-            # 볼륨 조정을 위해 PCMVolumeTransformer 사용
+
             source = discord.PCMVolumeTransformer(source, volume=1.0)
-            
+
             def after_play(error):
                 """재생 완료 후 콜백"""
-                import asyncio  # 클로저 스코프 문제 해결을 위해 명시적으로 import
+                import asyncio
                 if error:
                     logger.error(f"TTS 재생 오류: {error}")
-                    # 재생 실패 시에도 파일 정리 및 대기열 처리
                     if tts_file:
                         cleanup_tts_file(tts_file)
-                    # 비동기로 대기열 처리
                     asyncio.run_coroutine_threadsafe(
                         self._handle_playback_error(ctx, music_player, volume_lowered, music_was_playing, music_was_paused),
                         self.bot.loop
                     )
                 else:
                     logger.debug(f"TTS 재생 완료: {tts_file}")
-                    # 재생 성공 시 정상 처리
                     asyncio.run_coroutine_threadsafe(
                         self._cleanup_after_play(tts_file, ctx, music_player, volume_lowered, music_was_playing, music_was_paused),
                         self.bot.loop
                     )
-            
+
             logger.info(f"TTS 재생 시작: {tts_file.name}")
             ctx.voice_client.play(source, after=after_play)
-            
+            playback_started = True
             return True
         except Exception as e:
             logger.error(f"TTS 재생 오류: {e}", exc_info=True)
-            # 예외 발생 시 음악 재개 (비동기로 처리)
-            if music_was_playing and music_player and ctx.voice_client:
-                asyncio.create_task(self._restore_music_after_tts(ctx, music_player, volume_lowered, music_was_playing, music_was_paused))
-            # 예외 발생 시 생성된 파일 정리
-            if tts_file:
-                cleanup_tts_file(tts_file)
             return False
+        finally:
+            if music_was_paused and not playback_started and music_player and ctx.voice_client:
+                try:
+                    await self._restore_music_after_tts(
+                        ctx, music_player, volume_lowered, music_was_playing, music_was_paused
+                    )
+                except Exception as restore_err:
+                    logger.error(f"TTS 실패 후 음악 복원 오류: {restore_err}", exc_info=True)
+            if tts_file and not playback_started:
+                cleanup_tts_file(tts_file)
     
     async def _restore_music_after_tts(self, ctx, music_player=None, volume_lowered=False, music_was_playing=False, music_was_paused=False):
         """TTS 재생 후 음악 복원 헬퍼 함수"""
@@ -464,63 +452,55 @@ class TTS(commands.Cog):
 
     async def _process_queue(self, guild):
         """TTS 대기열을 처리합니다."""
-        # 재생 중이면 대기
-        if self.playing.get(guild.id, False):
-            return
-        
-        # voice_client 확인
-        if not guild.voice_client:
-            self.tts_queue[guild.id] = []
-            self.playing[guild.id] = False
-            return
-        
-        # 대기열이 비어있으면 종료
-        if guild.id not in self.tts_queue or not self.tts_queue[guild.id]:
-            self.playing[guild.id] = False
-            return
-        
-        # 대기열에서 항목 가져오기 (빈 텍스트 필터링)
-        while self.tts_queue[guild.id]:
-            user_id, text, settings = self.tts_queue[guild.id].pop(0)
-            
-            # 텍스트 유효성 검사
-            if not text or not text.strip() or len(text.strip()) > 200:
-                logger.debug(f"유효하지 않은 텍스트 건너뛰기: '{text[:50]}...'")
-                continue
-            
-            # 재생 플래그 설정
-            self.playing[guild.id] = True
-            
-            # 임시 context 생성 (재생용)
-            class TempContext:
-                def __init__(self, guild, voice_client, bot):
-                    self.guild = guild
-                    self.voice_client = voice_client
-                    self.bot = bot
-            
-            temp_ctx = TempContext(guild, guild.voice_client, self.bot)
-            success = await self.play_tts(
-                temp_ctx,
-                text.strip(),
-                settings.get('lang', 'ko'),
-                settings.get('voice_model', '기본'),
-                settings.get('slow', False),
-                settings.get('use_rvc', False),
-                settings.get('rvc_model', None),
-                settings.get('use_supertonic', False),
-                settings.get('supertonic_voice', 'default')
-            )
-            
-            # 재생 성공 시 종료 (재생 완료 후 _cleanup_after_play에서 다음 항목 처리)
-            if success:
+        lock = self._get_playback_lock(guild.id)
+        async with lock:
+            if self.playing.get(guild.id, False):
                 return
-            
-            # 재생 실패 시 플래그 해제하고 다음 항목 시도
+
+            if not guild.voice_client:
+                self.tts_queue[guild.id] = []
+                self.playing[guild.id] = False
+                return
+
+            if guild.id not in self.tts_queue or not self.tts_queue[guild.id]:
+                self.playing[guild.id] = False
+                return
+
+            while self.tts_queue[guild.id]:
+                user_id, text, settings = self.tts_queue[guild.id].pop(0)
+
+                if not text or not text.strip() or len(text.strip()) > 200:
+                    logger.debug(f"유효하지 않은 텍스트 건너뛰기: '{text[:50]}...'")
+                    continue
+
+                self.playing[guild.id] = True
+
+                class TempContext:
+                    def __init__(self, guild, voice_client, bot):
+                        self.guild = guild
+                        self.voice_client = voice_client
+                        self.bot = bot
+
+                temp_ctx = TempContext(guild, guild.voice_client, self.bot)
+                success = await self.play_tts(
+                    temp_ctx,
+                    text.strip(),
+                    settings.get('lang', 'ko'),
+                    settings.get('voice_model', '기본'),
+                    settings.get('slow', False),
+                    settings.get('use_rvc', False),
+                    settings.get('rvc_model', None),
+                    settings.get('use_supertonic', False),
+                    settings.get('supertonic_voice', 'default')
+                )
+
+                if success:
+                    return
+
+                self.playing[guild.id] = False
+                logger.warning("TTS 재생 실패, 대기열의 다음 항목 처리 시도")
+
             self.playing[guild.id] = False
-            logger.warning(f"TTS 재생 실패, 대기열의 다음 항목 처리 시도")
-        
-        # 모든 항목을 처리했거나 유효한 항목이 없으면 플래그 해제
-        self.playing[guild.id] = False
 
     @commands.Cog.listener()
     async def on_message(self, message):
@@ -573,19 +553,8 @@ class TTS(commands.Cog):
                 return
         
         # 대기열에 추가
-        if message.guild.id not in self.tts_queue:
-            self.tts_queue[message.guild.id] = []
-        
         settings = self.get_user_settings(message.author.id, message.guild.id)
-        self.tts_queue[message.guild.id].append((
-            message.author.id,
-            text,
-            settings
-        ))
-        
-        # 재생 중이 아니면 즉시 재생
-        if not self.playing.get(message.guild.id, False):
-            await self._process_queue(message.guild)
+        await self.enqueue_tts(message.guild, message.author.id, text, settings)
 
     @commands.command(name='tts', aliases=['말하기', '읽기', '읽어줘'])
     async def tts_command(self, ctx, *, text: str = None):
@@ -631,22 +600,12 @@ class TTS(commands.Cog):
 
         async with safe_typing(ctx):
             settings = self.get_user_settings(ctx.author.id, ctx.guild.id)
-            success = await self.play_tts(
-                ctx,
-                text,
-                settings.get('lang', 'ko'),
-                settings.get('voice_model', '기본'),
-                settings.get('slow', False),
-                settings.get('use_rvc', False),
-                settings.get('rvc_model', None),
-                settings.get('use_supertonic', False),
-                settings.get('supertonic_voice', 'default')
-            )
-            
-            if success:
+            queued = await self.enqueue_tts(ctx.guild, ctx.author.id, text, settings)
+
+            if queued:
                 await ctx.send(f"선생님, '{text[:50]}{'...' if len(text) > 50 else ''}'을(를) 읽어드릴게요!", delete_after=10)
             else:
-                await ctx.send("선생님, TTS 생성 중 오류가 발생했어요!", delete_after=12)
+                await ctx.send("선생님, TTS 대기열이 가득 찼거나 생성 중 오류가 발생했어요!", delete_after=12)
             
             await self.delete_command_message(ctx)
 
@@ -1152,6 +1111,12 @@ class TTS(commands.Cog):
         """
         if not _check_rvc_available():
             await ctx.send("선생님, RVC가 설치되지 않았어요! `pip install tts-with-rvc-onnx` 또는 `pip install tts-with-rvc`로 설치해주세요.", delete_after=15)
+            await self.delete_command_message(ctx)
+            return
+
+        can_manage = getattr(ctx.author, "guild_permissions", None) and ctx.author.guild_permissions.manage_guild
+        if not can_manage:
+            await ctx.send("선생님, RVC 모델 추가는 서버 관리 권한이 필요해요!", delete_after=12)
             await self.delete_command_message(ctx)
             return
         
