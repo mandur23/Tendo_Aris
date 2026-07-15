@@ -28,7 +28,7 @@ from GameSystem.TRPGEngine import (
     roll_check,
     roll_dice,
 )
-from cogs.trpg_ui import CharacterSetupModal, combat_status_lines
+from cogs.trpg_ui import CharacterSetupModal, combat_status_lines, hp_bar as _hp_bar
 from utils.config import LOCAL_AI_MODEL
 from utils.discord_utils import AuthorLockedView, safe_defer, safe_edit_message
 from utils.file_utils import load_trpg_saves, save_trpg_saves
@@ -41,11 +41,6 @@ SessionKey = Tuple[int, int, int]
 
 SELECT_VIEW_TIMEOUT = 180       # 장르/직업 선택 대기 시간 (초)
 ADVENTURE_VIEW_TIMEOUT = 1800   # 장면 버튼 유지 시간 (초). 만료돼도 !모험계속 으로 재개 가능.
-
-
-def _hp_bar(hp: int, max_hp: int, width: int = 10) -> str:
-    filled = max(0, min(width, round(width * hp / max_hp))) if max_hp > 0 else 0
-    return f"`{'█' * filled}{'░' * (width - filled)}` {hp}/{max_hp}"
 
 
 class GenreSelectView(AuthorLockedView):

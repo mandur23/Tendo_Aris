@@ -33,7 +33,7 @@ from GameSystem.TRPGEngine import (
     play_party_turn,
     roll_check,
 )
-from cogs.trpg_ui import CharacterSetupModal, combat_status_lines
+from cogs.trpg_ui import CharacterSetupModal, combat_status_lines, hp_bar as _hp_bar
 from utils.config import LOCAL_AI_MODEL
 from utils.discord_utils import AuthorLockedView, safe_defer, safe_edit_message
 from utils.file_utils import load_trpg_party_saves, save_trpg_party_saves
@@ -47,11 +47,6 @@ PartyKey = Tuple[int, int]
 SELECT_VIEW_TIMEOUT = 180       # 장르 선택 대기 시간 (초)
 LOBBY_TIMEOUT = 600             # 로비 모집 시간 (초). 만료되면 로비 자동 취소.
 ADVENTURE_VIEW_TIMEOUT = 1800   # 장면 버튼 유지 시간 (초). 만료돼도 !파티모험계속 으로 재개 가능.
-
-
-def _hp_bar(hp: int, max_hp: int, width: int = 10) -> str:
-    filled = max(0, min(width, round(width * hp / max_hp))) if max_hp > 0 else 0
-    return f"`{'█' * filled}{'░' * (width - filled)}` {hp}/{max_hp}"
 
 
 @dataclass

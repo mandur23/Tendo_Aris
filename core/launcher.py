@@ -17,6 +17,7 @@ from GameSystem.YachtDiceGame import YachtDiceGame
 from GameSystem.BlackjackGame import BlackjackGame
 from utils.config import DISCORD_BOT_TOKEN, COMMAND_PREFIX
 from utils.db_utils import close_db_pool
+from utils.file_utils import backup_data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +79,10 @@ async def run_bot(bot: FuzzyBot):
     if not DISCORD_BOT_TOKEN:
         logger.error("DISCORD_BOT_TOKEN이 설정되지 않았습니다. TOKEN.env 파일을 확인해주세요.")
         raise ValueError("DISCORD_BOT_TOKEN이 설정되지 않았습니다.")
-    
+
+    # 데이터(세이브·플레이리스트·설정) 일일 백업 — 실패해도 시작을 막지 않는다.
+    await asyncio.to_thread(backup_data_dir)
+
     try:
         async with bot:
             await load_cogs(bot)

@@ -1,7 +1,9 @@
+import datetime
 import json
 import logging
 import os
 import tempfile
+import zipfile
 from pathlib import Path
 from utils.config import USE_MYSQL
 
@@ -265,4 +267,49 @@ def save_trpg_world_saves(saves):
 def ensure_logs_dir():
     """logs 디렉토리가 존재하는지 확인하고 없으면 생성합니다."""
     LOGS_DIR.mkdir(exist_ok=True)
+
+
+# ------------------------------------------------------------------ 데이터 백업
+BACKUPS_DIR = Path('backups')
+BACKUP_MAX_KEEP = 14   # 보관할 일일 백업 개수 (약 2주치)
+
+
+def backup_data_dir(max_keep: int = BACKUP_MAX_KEEP):
+    """data/ 폴더 전체를 하루 1회 zip 으로 백업합니다.
+
+    세이브·플레이리스트·설정이 디스크 문제나 실수로 날아가는 것을 대비한다.
+    오늘자 백업이 이미 있으면 건너뛰고 None, 새로 만들면 경로 문자열을 반환한다.
+    실패해도 예외를 던지지 않는다 (봇 시작을 막지 않기 위해).
+    """
+    try:
+        BACKUPS_DIR.mkdir(exist_ok=True)
+        stamp = datetime.date.today().isoformat()
+        target = BACKUPS_DIR / f"data_backup_{stamp}.zip"
+        if target.exists():
+            return None
+
+        files = [p for p in DATA_DIR.rglob('*') if p.is_file()]
+        if not files:
+            return None
+
+        # 임시 파일에 만든 뒤 교체해 불완전한 zip 이 남지 않게 한다.
+        tmp_path = target.with_suffix('.zip.tmp')
+        with zipfile.ZipFile(tmp_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for path in files:
+                zf.write(path, path.relative_to(DATA_DIR.parent))
+        os.replace(tmp_path, target)
+
+        # 오래된 백업 정리
+        backups = sorted(BACKUPS_DIR.glob('data_backup_*.zip'))
+        for old in backups[:-max_keep]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+
+        logger.info(f"데이터 백업 생성: {target} ({len(files)}개 파일)")
+        return str(target)
+    except Exception as e:
+        logger.error(f"데이터 백업 실패 (무시하고 계속): {e}")
+        return None
 

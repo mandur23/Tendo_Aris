@@ -6,17 +6,24 @@ cogs/chat_ai.py 의 Ollama 연동 패턴을 다른 기능(TRPG 등)에서도 재
 import json
 import logging
 import re
+import threading
 from typing import Dict, List, Optional
 from urllib import error, request
 
 from utils.config import (
     LOCAL_AI_BASE_URL,
+    LOCAL_AI_MAX_CONCURRENCY,
     LOCAL_AI_MODEL,
     LOCAL_AI_TEMPERATURE,
     LOCAL_AI_TIMEOUT_SECONDS,
 )
 
 logger = logging.getLogger(__name__)
+
+# Ollama 동시 요청 전역 제한. 모든 LLM 호출(대화·TRPG 3종·요약·검색 판단)이
+# 이 세마포어를 지나므로, 채널이 많아져도 단일 GPU에 요청이 몰리지 않는다.
+# (동기 함수들이 asyncio.to_thread 스레드에서 돌기 때문에 threading 세마포어를 쓴다)
+OLLAMA_SEMAPHORE = threading.BoundedSemaphore(LOCAL_AI_MAX_CONCURRENCY)
 
 # 한글 / ASCII 가시 / 일반 문장부호 / 한국어 글에서 흔한 기호만 허용.
 # 그 외(한자·가나·라틴 확장·키릴 등) = 외래 문자.
@@ -156,8 +163,9 @@ def ollama_chat_sync(
     )
 
     try:
-        with request.urlopen(req, timeout=timeout or LOCAL_AI_TIMEOUT_SECONDS) as resp:
-            raw = resp.read().decode("utf-8")
+        with OLLAMA_SEMAPHORE:
+            with request.urlopen(req, timeout=timeout or LOCAL_AI_TIMEOUT_SECONDS) as resp:
+                raw = resp.read().decode("utf-8")
     except error.HTTPError as e:
         detail = e.read().decode("utf-8", errors="ignore") if hasattr(e, "read") else str(e)
         if e.code == 404 and "not found" in detail and "model" in detail:

@@ -88,6 +88,15 @@ cd Tendo_Aris
 pip install -r requirements.txt
 ```
 
+**테스트 실행** (선택): 게임 엔진·대화 AI·유틸리티 단위 테스트가 `tests/` 에 있습니다.
+```bash
+python -m pytest tests -q
+```
+GitHub에 push하면 CI(GitHub Actions)가 문법 검사와 테스트를 자동 실행합니다.
+
+**데이터 백업**: 봇을 시작할 때마다 `data/` 폴더(세이브·플레이리스트·설정)가
+`backups/data_backup_YYYY-MM-DD.zip` 으로 하루 1회 자동 백업됩니다 (최근 14개 보관).
+
 **주요 패키지:**
 - `discord.py>=2.3.0` - Discord API 래퍼
 - `yt-dlp>=2023.10.0` - YouTube 다운로더
@@ -116,6 +125,8 @@ LOCAL_AI_MODEL=llama3.1:8b
 LOCAL_AI_MAX_PROMPT_CHARS=2000
 LOCAL_AI_TEMPERATURE=0.7
 LOCAL_AI_TIMEOUT_SECONDS=120
+# Ollama 동시 요청 상한 (기본 2) — 여러 채널에서 대화·TRPG가 동시에 돌 때 GPU 과부하 방지
+LOCAL_AI_MAX_CONCURRENCY=2
 # 대화 AI 웹 검색 (선택사항, 기본값 켜짐 / DuckDuckGo, API 키 불필요)
 LOCAL_AI_WEB_SEARCH_ENABLED=true
 WEB_SEARCH_MAX_RESULTS=3

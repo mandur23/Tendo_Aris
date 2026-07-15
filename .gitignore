@@ -62,3 +62,9 @@ rmvpe.pt
 .DS_Store
 Thumbs.db
 vec-768-layer-12.onnx
+
+# 데이터 백업 (자동 생성)
+backups/
+
+# pytest
+.pytest_cache/

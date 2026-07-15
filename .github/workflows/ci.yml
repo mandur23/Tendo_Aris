@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # 봇 실행용 무거운 의존성(음성·TTS·RVC)은 설치하지 않는다.
+      # 테스트는 엔진·대화 AI·유틸만 다루므로 최소 의존성으로 충분하다.
+      - name: Install test dependencies
+        run: pip install "discord.py>=2.7.0" python-dotenv rapidfuzz pytest
+
+      - name: Syntax check (whole project)
+        run: python -m compileall -q bot.py core cogs utils GameSystem
+
+      - name: Run tests
+        run: pytest tests -q

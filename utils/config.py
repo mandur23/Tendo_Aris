@@ -88,6 +88,16 @@ except (TypeError, ValueError):
 # 모델을 메모리에 유지할 시간 (유휴 후 첫 응답 지연 방지). 예: '30m', '1h', '-1'(무제한)
 LOCAL_AI_KEEP_ALIVE = os.getenv('LOCAL_AI_KEEP_ALIVE', '30m').strip() or '30m'
 
+# Ollama 동시 요청 상한 — 여러 채널(대화/TRPG)에서 동시에 요청이 몰려도
+# 단일 GPU가 과부하되지 않도록 전역으로 제한한다.
+try:
+    LOCAL_AI_MAX_CONCURRENCY = int(os.getenv('LOCAL_AI_MAX_CONCURRENCY', '2'))
+except (TypeError, ValueError):
+    LOCAL_AI_MAX_CONCURRENCY = 2
+    if os.getenv('LOCAL_AI_MAX_CONCURRENCY') is not None:
+        logger.warning("LOCAL_AI_MAX_CONCURRENCY가 숫자가 아니에요. 2를 사용할게요.")
+LOCAL_AI_MAX_CONCURRENCY = max(1, min(8, LOCAL_AI_MAX_CONCURRENCY))
+
 # 대화형 AI 웹 검색 (DuckDuckGo, API 키 불필요) 설정
 # 켜져 있으면 매 메시지마다 LLM이 검색 필요 여부를 판단하고, 필요할 때만 검색 결과를 참고해 답한다.
 LOCAL_AI_WEB_SEARCH_ENABLED = os.getenv('LOCAL_AI_WEB_SEARCH_ENABLED', 'true').strip().lower() in ('1', 'true', 'yes', 'on')

@@ -42,6 +42,7 @@ from utils.discord_utils import safe_defer, safe_typing
 from utils.file_utils import load_trpg_party_saves, load_trpg_saves, load_trpg_world_saves
 from utils.knowledge_utils import knowledge_stats, search_knowledge
 from utils.llm_utils import (
+    OLLAMA_SEMAPHORE,
     contains_non_korean,
     extract_json_object,
     ollama_chat_sync,
@@ -265,8 +266,9 @@ class ChatAI(commands.Cog):
         )
 
         try:
-            with request.urlopen(req, timeout=LOCAL_AI_TIMEOUT_SECONDS) as resp:
-                raw = resp.read().decode("utf-8")
+            with OLLAMA_SEMAPHORE:
+                with request.urlopen(req, timeout=LOCAL_AI_TIMEOUT_SECONDS) as resp:
+                    raw = resp.read().decode("utf-8")
         except error.HTTPError as e:
             detail = e.read().decode("utf-8", errors="ignore") if hasattr(e, "read") else str(e)
             if e.code == 404 and "not found" in detail and "model" in detail:

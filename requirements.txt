@@ -25,3 +25,6 @@ supertonic>=1.2.1  # 공식 PyPI 패키지 (onnxruntime, numpy, soundfile, huggi
 onnxruntime==1.19.2  # Supertonic TTS를 위한 ONNX Runtime (1.20+ 은 Windows DLL 충돌 발생)
 numpy>=1.24.0  # Supertonic TTS를 위한 NumPy (supertonic 의존성)
 huggingface_hub>=0.19.0  # Supertonic 모델 다운로드 (supertonic 의존성)
+
+# 개발/테스트 전용 (봇 실행에는 불필요)
+pytest>=8.0.0  # tests/ 단위 테스트 실행: python -m pytest tests -q
