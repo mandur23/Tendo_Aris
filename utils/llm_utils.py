@@ -18,13 +18,19 @@ from utils.config import (
 
 logger = logging.getLogger(__name__)
 
-# 한글 / ASCII 가시 / 일반 문장부호만 허용. 그 외(한자·가나·라틴 확장·키릴 등) = 외래 문자.
+# 한글 / ASCII 가시 / 일반 문장부호 / 한국어 글에서 흔한 기호만 허용.
+# 그 외(한자·가나·라틴 확장·키릴 등) = 외래 문자.
 _NON_KOREAN_RE = re.compile(
     r"[^"
-    r"가-힣"
-    r"ᄀ-ᇿ㄰-㆏"
-    r"\x09\x0A\x0D\x20-\x7E"
-    r"‐-‧‰-⁞"
+    r"가-힣"                     # 한글 음절
+    r"ᄀ-ᇿ㄰-㆏"                 # 한글 자모 (ㅋㅋ, ㆍ 등)
+    r"\x09\x0A\x0D\x20-\x7E"    # 탭/개행 + ASCII 가시 문자
+    r"‐-‧‰-⁞"                   # 일반 문장부호 (— … “” ‘’ 등)
+    r"·"                        # 가운뎃점 (U+00B7)
+    r"°℃℉"                      # 온도·각도 단위
+    r"×÷±"                      # 수학 기호
+    r"～"                       # 전각 물결 (U+FF5E, '빰빠라밤～' 등)
+    r"←-↓"                      # 기본 화살표 (U+2190-U+2193)
     r"]"
 )
 # URL / 코드 블록은 외래 문자 검사·치환에서 제외하기 위해 따로 매칭한다.
@@ -72,6 +78,12 @@ def check_model_available(model: Optional[str] = None) -> None:
         f"모델 '{model_name}'이 설치되어 있지 않습니다. "
         f"설치된 모델: {available or '없음'}"
     )
+
+
+def contains_non_korean(text: str) -> bool:
+    """URL/코드 블록을 제외한 본문에 비-한국어 외래 문자(한자/가나/키릴 등)가 있는지 검사한다."""
+    stripped = _URL_OR_CODE_RE.sub("", text)
+    return bool(_NON_KOREAN_RE.search(stripped))
 
 
 def strip_non_korean(text: str) -> str:

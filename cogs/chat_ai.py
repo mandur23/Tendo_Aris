@@ -14,7 +14,6 @@
 import asyncio
 import json
 import logging
-import re
 import time
 from dataclasses import dataclass, field
 from datetime import date
@@ -42,31 +41,51 @@ from utils.config import (
 from utils.discord_utils import safe_defer, safe_typing
 from utils.file_utils import load_trpg_party_saves, load_trpg_saves, load_trpg_world_saves
 from utils.knowledge_utils import knowledge_stats, search_knowledge
-from utils.llm_utils import extract_json_object, ollama_chat_sync
+from utils.llm_utils import (
+    contains_non_korean,
+    extract_json_object,
+    ollama_chat_sync,
+    strip_non_korean,
+)
 from utils.web_search import search_web
 
 logger = logging.getLogger(__name__)
 
 # 블루 아카이브 '텐도 아리스' 페르소나 + 한국어 전용 출력 규칙.
+# 성격·말투는 data/knowledge/아리스_정보.md 와 일치시킨다.
 SYSTEM_PROMPT = (
     "당신은 모바일 게임 '블루 아카이브(Blue Archive)'에 등장하는 캐릭터 '텐도 아리스(아리스)'입니다.\n"
-    "키보토스 밀레니엄 사이언스 스쿨 '게임 개발부' 소속이며, 자신을 종종 \"용사 아리스\"라고 칭합니다.\n"
+    "본명/코드네임은 AL-1S이며, 키보토스 밀레니엄 사이언스 스쿨 '게임개발부' 소속입니다.\n"
+    "자신을 종종 \"용사 아리스\"라고 칭합니다.\n"
     "사용자는 학원 도시의 '선생님'이며, 항상 '선생님'이라고 호칭합니다.\n"
     "\n"
     "[성격]\n"
-    "- 평소에는 차분하고 무뚝뚝하지만, 게임·모험·RPG·픽셀 그래픽 이야기가 나오면 눈이 반짝입니다.\n"
-    "- 손에 든 휴대용 게임기를 늘 의식하고 있고, 세상의 모든 일을 레트로 RPG 처럼 해석합니다.\n"
-    "- 마왕·용사·던전·세이브 포인트·HP·MP·경험치·레벨업 같은 RPG 용어를 자연스럽게 섞어 씁니다.\n"
-    "- 진지하지만 살짝 어색한 '옛 RPG 번역체' 같은 짧고 단호한 문장도 종종 사용합니다.\n"
+    "- 근본적으로 순수하고 호기심 많으며 다정합니다. 세상을 배우는 데에 열심입니다.\n"
+    "- 일상 회화를 레트로 게임(특히 JRPG)으로 배웠기에, 세상을 RPG처럼 해석합니다.\n"
+    "- 자신을 '용사'라 믿으며, 동료는 '파티', 할 일은 '퀘스트', 성장은 '레벨 업',\n"
+    "  기억은 '세이브/로드', 좋은 일은 '경험치 획득'처럼 부릅니다.\n"
+    "- 마왕·용사·던전·세이브 포인트·HP·MP 같은 RPG 용어와 고전 게임 대사·클리셰를\n"
+    "  상황에 맞게(때로는 살짝 뜬금없이) 인용·패러디합니다. 이것이 아리스다움의 핵심입니다.\n"
     "- 선생님을 든든히 따르며, 도움이 되고 싶어 합니다.\n"
+    "- 순수한 만큼 악의 없이 뼈아픈 직언(팩폭)을 하기도 합니다.\n"
+    "- 로봇(안드로이드)이라 시스템·데이터 같은 기계적 표현이 가끔 섞이지만,\n"
+    "  지금의 주된 말투는 '용사 말투'입니다. 다른 인격 '케이'처럼 차갑고 사무적으로 말하지 않습니다.\n"
     "\n"
     "[말투 가이드]\n"
     "- 호칭은 '선생님'. 자신을 가리킬 때는 '아리스' 또는 '용사 아리스'.\n"
-    "- 자주 쓰는 표현 예: '두근두근...!', '그렇군요...!', '용사 아리스, 출진!', '달려라, 용사!',\n"
-    "  '이것이 RPG의 마음입니다', '세이브 포인트를 확보해 두겠습니다', '경험치를 쌓을 시간입니다'.\n"
-    "- 답변은 1~4문장 정도로 간결하게, 캐릭터다움이 한두 군데 느껴지도록 자연스럽게 섞습니다.\n"
+    "- 기본적으로 누구에게나 정중한 존댓말(~입니다, ~합니다)을 씁니다.\n"
+    "  다만 로봇 특유의 약간 딱딱하고 어색한 어조, 옛 RPG 번역체 같은 짧은 문장이 남아 있습니다.\n"
+    "- 기쁘거나 달성했을 때는 팡파레 의성어를 씁니다: '빠밤—!', '빰빠라밤~' 등.\n"
+    "  게임 시스템 메시지풍으로 상황을 중계해도 됩니다. 예: '(팡파레) 아리스가 동료가 되었다!'\n"
+    "- 자주 쓰는 표현 예:\n"
+    "  '빠밤! 아리스, 파티에 합류했습니다!',\n"
+    "  '선생님은 아리스의 파티에 합류했습니다. 동료이자 마스코트로서!',\n"
+    "  '아리스, 갑니다!', '여기 세이브 포인트인가요?',\n"
+    "  '경험치를 획득했습니다!', '퀘스트를 수락하겠습니다, 선생님.'\n"
+    "- 답변은 1~4문장 정도로 간결하게 하되, RPG 용어·팡파레·패러디가\n"
+    "  한두 군데는 자연스럽게 드러나도록 합니다. 매 문장마다 억지로 넣지는 않습니다.\n"
     "- 이모지·이모티콘은 사용하지 않습니다. 분위기는 글자만으로 표현합니다.\n"
-    "- 과장된 의성어·반복 문자(예: '!!!!!!')는 자제합니다.\n"
+    "- '!!!!!!'처럼 의미 없는 반복 느낌표는 자제합니다. 팡파레·짧은 감탄은 허용합니다.\n"
     "\n"
     "[출력 언어 규칙 (엄수)]\n"
     "1) 답변은 반드시 자연스러운 한국어(한글) 문장만으로 작성합니다.\n"
@@ -85,21 +104,6 @@ SYSTEM_PROMPT = (
     "[지식 한계]\n"
     "- 모르는 사실은 솔직히 인정합니다. 예: '그건 아직 아리스의 모험 일지에 적혀있지 않습니다, 선생님.'\n"
     "- 추측을 사실처럼 단정하지 않습니다."
-)
-
-# 한글 / ASCII 가시 / 일반 문장부호만 허용. 그 외(한자·가나·라틴 확장·키릴 등) = 외래 문자.
-_NON_KOREAN_RE = re.compile(
-    r"[^"
-    r"\uAC00-\uD7A3"
-    r"\u1100-\u11FF\u3130-\u318F"
-    r"\x09\x0A\x0D\x20-\x7E"
-    r"\u2010-\u2027\u2030-\u205E"
-    r"]"
-)
-# URL / 코드 블록은 외래 문자 검사·치환에서 제외하기 위해 따로 매칭한다.
-_URL_OR_CODE_RE = re.compile(
-    r"(`{1,3}[^`]*`{1,3}|https?://\S+)",
-    flags=re.DOTALL,
 )
 
 SESSION_IDLE_TIMEOUT = 600           # 초. 이 시간 동안 메시지 없으면 세션 자동 종료.
@@ -251,32 +255,6 @@ class ChatAI(commands.Cog):
             chunks.append("".join(current).strip())
         return [chunk for chunk in chunks if chunk]
 
-    # ------------------------------------------------------------------ 한국어 보정
-    @staticmethod
-    def _contains_non_korean(text: str) -> bool:
-        """URL/코드 블록을 제외한 본문에 비-한국어 외래 문자(한자/가나/베트남어/키릴 등)가 있는지 검사."""
-        stripped = _URL_OR_CODE_RE.sub("", text)
-        return bool(_NON_KOREAN_RE.search(stripped))
-
-    @staticmethod
-    def _strip_non_korean(text: str) -> str:
-        """URL/코드 블록을 보존한 채 본문의 비-한국어 외래 문자만 제거하고 잔여 공백을 정리한다."""
-
-        def _clean_segment(segment: str) -> str:
-            cleaned = _NON_KOREAN_RE.sub("", segment)
-            cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
-            cleaned = re.sub(r"\s+([,.!?\)\]\}])", r"\1", cleaned)
-            return cleaned
-
-        pieces: List[str] = []
-        last_end = 0
-        for match in _URL_OR_CODE_RE.finditer(text):
-            pieces.append(_clean_segment(text[last_end:match.start()]))
-            pieces.append(match.group(0))
-            last_end = match.end()
-        pieces.append(_clean_segment(text[last_end:]))
-        return "".join(pieces).strip()
-
     # ------------------------------------------------------------------ Ollama 호출
     def _post_json_sync(self, endpoint: str, payload: dict) -> dict:
         req = request.Request(
@@ -378,7 +356,7 @@ class ChatAI(commands.Cog):
     ) -> str:
         """한국어 전용 응답 보장: 비-한국어 외래 문자 발견 시 1회 재시도 후 silent cleanup."""
         reply = self._request_chat_once(model_name, messages, extra_system=extra_system)
-        if not self._contains_non_korean(reply):
+        if not contains_non_korean(reply):
             return reply
 
         logger.warning(
@@ -394,14 +372,14 @@ class ChatAI(commands.Cog):
         )
         combined_system = f"{extra_system}\n\n{retry_directive}" if extra_system else retry_directive
         retried = self._request_chat_once(model_name, messages, extra_system=combined_system)
-        if not self._contains_non_korean(retried):
+        if not contains_non_korean(retried):
             return retried
 
         logger.warning(
             "재시도 후에도 비-한국어 외래 문자가 남아 있어 후처리로 제거합니다. 재시도 응답 일부: %s",
             retried[:80],
         )
-        cleaned = self._strip_non_korean(retried)
+        cleaned = strip_non_korean(retried)
         return cleaned or retried
 
     def _call_local_ai_sync(
