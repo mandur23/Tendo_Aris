@@ -19,6 +19,7 @@ from GameSystem.TRPGEngine import (
     CLASSES,
     DEFAULT_DC,
     FREE_ACTION_DC,
+    judge_free_action,
     GENRES,
     TRPGAdventure,
     TRPGCharacter,
@@ -511,6 +512,11 @@ class TRPG(commands.Cog):
             channel = interaction.channel
             # 전투 중 지정 행동(공격/방어)은 코드가 명중·피해를 굴리므로 별도 d20 판정을 하지 않는다.
             in_combat_action = adv.combat is not None and (choice or {}).get("combat") in ("attack", "defend")
+            # 자유 행동은 선언한 내용에 맞는 능력치로 판정한다 (예: 자물쇠 따기 → 민첩).
+            if fate_roll and stat is None and not in_combat_action:
+                stat, dc = await asyncio.to_thread(
+                    judge_free_action, action_text, adv.character, model=self._model()
+                )
             check = roll_check(adv.character, stat, dc) if (stat or fate_roll) and not in_combat_action else None
 
             header = f"🕹️ **{adv.character.name}**: {action_text}"

@@ -11,7 +11,7 @@ import copy
 import random
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from utils.llm_utils import extract_json_object, ollama_chat_sync, strip_non_korean
 
@@ -187,6 +187,130 @@ def roll_check(character: "TRPGCharacter", stat: Optional[str], dc: int = DEFAUL
     """d20 + 스탯 보정 판정을 굴린다. stat 이 None 이면 보정 없이 굴린다."""
     mod = character.stats.get(stat, 0) if stat else 0
     return CheckResult(stat=stat, roll=random.randint(1, 20), mod=mod, dc=dc)
+
+
+# ------------------------------------------------------------------ 자유 행동의 판정 능력치 결정
+# 실제 TRPG 의 GM 처럼 "자물쇠를 딴다 → 민첩 판정" 식으로 행동에 맞는 능력치를 고른다.
+# 1) 한국어 키워드 매칭(즉시, LLM 호출 없음) → 2) 실패 시 LLM 판단 → 3) 그래도 애매하면 운명 판정.
+FREE_ACTION_KEYWORDS: Dict[str, tuple] = {
+    "힘": (
+        "부수", "부순", "때려부", "박살", "파괴", "밀어", "밀친", "밀치", "들어올", "들어 올",
+        "들어서", "번쩍", "당기", "잡아당", "뽑아", "뜯어", "비틀", "휘두르", "휘둘", "내려치",
+        "후려", "베어", "베고", "찍어", "짓밟", "걷어차", "발로 차", "던져", "집어던", "막아서",
+        "버티", "붙잡아", "붙들", "조르", "힘껏", "힘으로", "완력", "돌파", "밀어붙", "옮기", "나르",
+    ),
+    "민첩": (
+        "몰래", "살금", "은밀", "숨어", "숨는", "숨기", "잠입", "피하", "피해서", "회피", "굴러",
+        "달려", "달리", "뛰어", "도망", "도주", "빠져나", "자물쇠", "따고", "따본", "훔치", "훔쳐",
+        "소매치기", "슬쩍", "재빠", "재빨", "날렵", "잽싸", "기어", "매달", "타넘", "뛰어넘",
+        "균형", "손재주", "정밀", "조준", "활을", "화살", "던지기", "곡예", "묘기", "발소리",
+    ),
+    "지능": (
+        "조사", "살펴", "살피", "관찰", "확인", "분석", "파악", "추리", "추론", "생각", "궁리",
+        "떠올", "기억", "회상", "해독", "번역", "읽어", "읽는", "읽고", "연구", "탐색", "수색",
+        "뒤져", "뒤진", "흔적", "단서", "함정", "감정", "식별", "계산", "지도", "경로", "약점",
+        "마법", "주문", "시전", "마력", "결계", "장치", "기계", "해킹", "수리", "조작", "지식",
+    ),
+    "매력": (
+        "설득", "설명", "부탁", "요청", "제안", "협상", "흥정", "거래", "속이", "속여", "거짓",
+        "구슬리", "구슬려", "꼬드기", "유혹", "매수", "회유", "위협", "협박", "겁주", "으름장",
+        "노래", "연주", "공연", "춤", "이야기", "말을 걸", "말 걸", "대화", "물어", "묻는", "묻고",
+        "캐묻", "소문", "수소문", "인사", "자기소개", "사과", "달래", "격려", "설전", "명령", "지휘",
+    ),
+}
+
+# 키워드로 판정 능력치를 찾았을 때 쓰는 기본 난이도 (보정을 받으므로 운명 판정보다 살짝 높다).
+FREE_ACTION_STAT_DC = DEFAULT_DC
+
+FREE_ACTION_JUDGE_SYSTEM = (
+    "당신은 TRPG 게임 마스터의 판정 보조입니다. 플레이어가 선언한 자유 행동에 대해 "
+    "어떤 능력치로 판정할지와 난이도를 정하세요.\n"
+    "- 힘: 부수기, 밀기, 들어올리기, 힘으로 제압하기 등 완력이 필요한 행동\n"
+    "- 민첩: 잠입, 회피, 곡예, 자물쇠 따기, 소매치기, 정밀한 손놀림 등\n"
+    "- 지능: 조사, 관찰, 추리, 해독, 마법, 장치 조작, 지식이 필요한 행동 등\n"
+    "- 매력: 설득, 거짓말, 협상, 위협, 공연, 정보를 캐묻는 대화 등\n"
+    "- 없음: 판정이 필요 없는 아주 안전하고 사소한 행동 (걷기, 둘러보기, 말 한마디 등)\n"
+    '- 다음 JSON 객체 하나만 출력합니다: {"stat": "힘|민첩|지능|매력|없음", "dc": 12}\n'
+    "- dc 는 8(매우 쉬움)~18(매우 어려움) 사이 정수이며, 보통 난이도는 12 입니다."
+)
+
+# 판단 응답은 짧으므로 생성 길이를 제한해 지연을 줄인다.
+FREE_ACTION_JUDGE_NUM_PREDICT = 80
+
+
+def _keyword_stat(action_text: str) -> Optional[str]:
+    """행동 문장에서 키워드를 세어 판정 능력치를 고른다. 없으면 None."""
+    text = (action_text or "").strip()
+    if not text:
+        return None
+
+    best_stat: Optional[str] = None
+    best_score = 0
+    best_len = 0
+    # STATS 순서를 따라 결정적으로 고른다 (동점이면 더 긴 키워드가 걸린 쪽을 우선).
+    for stat in STATS:
+        score = 0
+        longest = 0
+        for keyword in FREE_ACTION_KEYWORDS.get(stat, ()):
+            if keyword in text:
+                score += 1
+                longest = max(longest, len(keyword))
+        if score > best_score or (score == best_score and score > 0 and longest > best_len):
+            best_stat, best_score, best_len = stat, score, longest
+    return best_stat
+
+
+def judge_free_action(
+    action_text: str,
+    character: Optional["TRPGCharacter"] = None,
+    *,
+    model: Optional[str] = None,
+    use_llm: bool = True,
+) -> Tuple[Optional[str], int]:
+    """자유 행동에 어울리는 (판정 능력치, 난이도)를 결정한다.
+
+    키워드로 즉시 판단되면 LLM을 호출하지 않는다. 애매하면 LLM에게 물어보고,
+    그마저 실패하면 기존처럼 보정 없는 운명 판정((None, FREE_ACTION_DC))으로 돌아간다.
+    (LLM 호출이 있으므로 asyncio.to_thread 로 감싸서 사용할 것)
+    """
+    stat = _keyword_stat(action_text)
+    if stat is not None:
+        return stat, FREE_ACTION_STAT_DC
+
+    if not use_llm:
+        return None, FREE_ACTION_DC
+
+    char_line = f"\n[행동하는 캐릭터]\n{character.prompt_text()}" if character is not None else ""
+    user_content = (
+        f"[플레이어가 선언한 행동]\n{action_text}{char_line}\n\n"
+        "이 행동의 판정 능력치와 난이도를 지시한 JSON 형식으로만 답하세요."
+    )
+    try:
+        reply = ollama_chat_sync(
+            [{"role": "user", "content": user_content}],
+            system=FREE_ACTION_JUDGE_SYSTEM,
+            model=model,
+            temperature=0.1,
+            format_json=True,
+            num_predict=FREE_ACTION_JUDGE_NUM_PREDICT,
+        )
+        data = extract_json_object(reply)
+    except Exception as e:
+        logger.debug(f"자유 행동 판정 능력치 결정 실패, 운명 판정으로 진행합니다: {e}")
+        return None, FREE_ACTION_DC
+
+    raw_stat = data.get("stat")
+    stat = raw_stat if raw_stat in STATS else None
+    try:
+        dc = int(data.get("dc", FREE_ACTION_STAT_DC))
+    except (TypeError, ValueError):
+        dc = FREE_ACTION_STAT_DC
+    dc = max(8, min(18, dc))
+
+    if stat is None:
+        # '없음' 판단이거나 형식이 어긋난 경우 — 보정 없는 운명 판정으로 처리한다.
+        return None, min(dc, FREE_ACTION_DC)
+    return stat, dc
 
 
 # ------------------------------------------------------------------ 범용 주사위 (NdM+K 표기)
