@@ -37,6 +37,8 @@ except ImportError:  # psutil이 없어도 대시보드는 동작해야 한다
 
 from core.shutdown_handler import get_shutdown_event
 from utils import db_utils
+from utils import krx_api
+from utils import naver_stock
 from utils.file_utils import atomic_write_text
 from utils.config import (
     BASE_DIR,
@@ -223,7 +225,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     border-radius:8px; padding:6px 10px; font-family:var(--mono); }
   select:focus { outline:none; border-color:var(--cyan); box-shadow:0 0 10px rgba(34,211,238,.3); }
   input[type=checkbox] { accent-color:var(--cyan); }
+  input[type=text] { background:rgba(5,9,20,.85); color:var(--text);
+    border:1px solid rgba(56,189,248,.3); border-radius:8px; padding:7px 11px;
+    font-family:var(--mono); font-size:13px; }
+  input[type=text]:focus { outline:none; border-color:var(--cyan); box-shadow:0 0 10px rgba(34,211,238,.3); }
   label { user-select:none; }
+  .stock-up { color:#ff6b6b; text-shadow:0 0 10px rgba(255,107,107,.4); }
+  .stock-down { color:#5aa0ff; text-shadow:0 0 10px rgba(90,160,255,.4); }
+  .stock-price { font-size:26px; font-family:var(--mono); margin:6px 0 14px; }
+  .stock-badge { display:inline-block; font-size:10px; letter-spacing:1.5px; padding:2px 8px;
+    border-radius:6px; border:1px solid var(--line); color:var(--muted); margin-left:8px;
+    vertical-align:middle; font-family:var(--mono); }
   pre { background:rgba(3,6,14,.9); border:1px solid rgba(56,189,248,.14); border-radius:10px;
     padding:14px; font-size:12px; line-height:1.55; max-height:400px; overflow:auto;
     white-space:pre-wrap; word-break:break-all; font-family:var(--mono); color:#9fd8c8; }
@@ -342,6 +354,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <section>
     <h2>봇 상태</h2>
     <div class="kv" id="bot-kv"></div>
+  </section>
+
+  <section>
+    <h2>주식 시세 (실시간)</h2>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:12px">
+      <input type="text" id="stock-q" placeholder="종목명 또는 6자리 코드 (예: 삼성전자, 005930)"
+             style="flex:1; min-width:220px" onkeydown="if(event.key==='Enter')lookupStock()">
+      <input type="text" id="stock-date" placeholder="기준일 YYYYMMDD (비우면 실시간)"
+             style="width:200px" onkeydown="if(event.key==='Enter')lookupStock()">
+      <button class="primary" onclick="lookupStock()">조회</button>
+    </div>
+    <div id="stock-result" class="muted">종목명이나 6자리 코드를 입력하고 조회하세요. 날짜를 비우면 장중 실시간(네이버), 날짜를 넣으면 그날 종가(KRX)를 보여줍니다.</div>
   </section>
 
   <section>
@@ -817,6 +841,84 @@ async function logout() {
   location.href = '/login';
 }
 
+/* ---- 주식 시세 (실시간: 네이버 / 과거: KRX) ---- */
+let _stockTimer = null;
+function stockNum(v) {
+  const n = Number(String(v == null ? '' : v).replace(/,/g, ''));
+  return isFinite(n) ? n.toLocaleString('ko-KR') : (v == null || v === '' ? '-' : v);
+}
+function renderStock(d) {
+  const box = document.getElementById('stock-result');
+  box.className = '';
+  box.replaceChildren();
+
+  const dir = d.direction;
+  const cls = dir === 'up' ? 'stock-up' : (dir === 'down' ? 'stock-down' : '');
+  const arrow = dir === 'up' ? '▲' : (dir === 'down' ? '▼' : '');
+  const rate = d.rate;
+  const rateTxt = (rate == null) ? '-' : ((rate > 0 ? '+' : '') + rate + '%');
+
+  const title = el('div');
+  title.appendChild(el('strong', (d.name || '-') + ' (' + (d.code || '-') + ')'));
+  title.appendChild(el('span', d.market_label || '', 'stock-badge'));
+  if (d.realtime && d.market_open) {
+    const live = el('span', '● LIVE', 'stock-badge');
+    live.style.color = '#2dd4a7'; live.style.borderColor = 'rgba(45,212,167,.5)';
+    title.appendChild(live);
+  }
+  box.appendChild(title);
+
+  const price = el('div', null, 'stock-price ' + cls);
+  const chg = d.change;
+  price.textContent = stockNum(d.price) + '원  '
+    + (chg != null && chg !== 0 ? arrow + stockNum(Math.abs(chg)) + '  ' : '')
+    + '(' + rateTxt + ')';
+  box.appendChild(price);
+
+  const grid = el('div', null, 'kv');
+  grid.appendChild(kvItem('시가', stockNum(d.open) + '원'));
+  grid.appendChild(kvItem('고가', stockNum(d.high) + '원'));
+  grid.appendChild(kvItem('저가', stockNum(d.low) + '원'));
+  grid.appendChild(kvItem('거래량', stockNum(d.volume) + '주'));
+  if (d.trade_value) grid.appendChild(kvItem('거래대금', d.trade_value));
+  if (d.marketcap) grid.appendChild(kvItem('시가총액', d.marketcap));
+  box.appendChild(grid);
+
+  const foot = el('div', (d.stamp || '') + ' · 자료: ' + (d.source || ''), 'muted');
+  foot.style.marginTop = '10px';
+  box.appendChild(foot);
+}
+async function fetchStock(q, date, isAuto) {
+  let url = '/api/stock?q=' + encodeURIComponent(q);
+  if (date) url += '&date=' + encodeURIComponent(date);
+  const box = document.getElementById('stock-result');
+  try {
+    const r = await api(url);
+    if (!r) return;
+    const d = await r.json();
+    if (!r.ok || d.error) {
+      if (!isAuto) { box.className = 'muted bad'; box.textContent = d.error || '조회 실패'; }
+      return;
+    }
+    renderStock(d);
+    if (_stockTimer) { clearTimeout(_stockTimer); _stockTimer = null; }
+    if (d.realtime && d.market_open) {  // 장중이면 자동 새로고침
+      _stockTimer = setTimeout(() => fetchStock(d.code, '', true), Math.max(3000, d.polling_ms || 7000));
+    }
+  } catch (e) {
+    if (!isAuto) { box.className = 'muted bad'; box.textContent = '조회 중 오류: ' + e; }
+  }
+}
+function lookupStock() {
+  if (_stockTimer) { clearTimeout(_stockTimer); _stockTimer = null; }
+  const q = document.getElementById('stock-q').value.trim();
+  const date = document.getElementById('stock-date').value.trim();
+  const box = document.getElementById('stock-result');
+  if (!q) { box.className = 'muted'; box.textContent = '종목명 또는 코드를 입력하세요.'; return; }
+  box.className = 'muted'; box.textContent = '조회 중...';
+  fetchStock(q, date, false);
+}
+
 refreshAll();
 loadModels();
 loadLogs();
@@ -849,6 +951,7 @@ class WebAdmin:
             web.post("/login", self.do_login),
             web.post("/logout", self.do_logout),
             web.get("/api/status", self.api_status),
+            web.get("/api/stock", self.api_stock),
             web.get("/api/logs", self.api_logs),
             web.get("/api/chat/models", self.api_chat_models),
             web.post("/api/chat/model", self.api_chat_set_model),
@@ -1233,6 +1336,95 @@ class WebAdmin:
         lines = max(10, min(lines, 1000))
         text = await asyncio.to_thread(self._tail_log_sync, lines)
         return web.Response(text=text, content_type="text/plain", charset="utf-8")
+
+    # ------------------------------------------------------------------ 주식 API (실시간: 네이버 / 과거: KRX)
+    @staticmethod
+    def _to_int(value):
+        try:
+            return int(str(value).replace(",", "").strip())
+        except (TypeError, ValueError):
+            return None
+
+    async def api_stock(self, request: web.Request) -> web.Response:
+        """?q=종목명|코드 [&date=YYYYMMDD]
+
+        date 없으면 네이버 준실시간 현재가, date 있으면 KRX 일별 종가(과거)를 정규화해 반환.
+        """
+        query = (request.query.get("q") or "").strip()
+        if not query:
+            return web.json_response({"error": "종목명 또는 코드(q)가 필요합니다."}, status=400)
+        date = (request.query.get("date") or "").strip() or None
+
+        try:
+            if date:
+                result = await self._stock_historical(query, date)
+            else:
+                result = await self._stock_realtime(query)
+        except (krx_api.KrxApiError, naver_stock.NaverStockError) as e:
+            return web.json_response({"error": str(e)}, status=502)
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"웹 관리자 주가 조회 오류: {e}", exc_info=True)
+            return web.json_response({"error": f"조회 오류: {type(e).__name__}"}, status=500)
+
+        if result is None:
+            return web.json_response({"error": f"'{query}' 종목을 찾지 못했습니다."}, status=404)
+        return web.json_response(result)
+
+    async def _stock_realtime(self, query: str):
+        q = await naver_stock.quote_by_query(query)
+        if not q:
+            return None
+        return {
+            "name": q.get("name"), "code": q.get("code"),
+            "market_label": q.get("market_label"),
+            "price": q.get("price"), "change": q.get("change"), "rate": q.get("rate"),
+            "direction": q.get("direction"),
+            "open": q.get("open"), "high": q.get("high"), "low": q.get("low"),
+            "volume": q.get("volume"), "trade_value": q.get("trade_value") or None,
+            "marketcap": None,
+            "stamp": (f"실시간 {q.get('time_text')}" if q.get("market_open") else "장마감 · 종가"),
+            "realtime": True, "market_open": bool(q.get("market_open")),
+            "polling_ms": q.get("polling_ms") or 7000,
+            "source": q.get("source") or "네이버 금융",
+        }
+
+    async def _stock_historical(self, query: str, date: str):
+        if not krx_api.is_configured():
+            raise krx_api.KrxApiError(
+                "과거 종가 조회(KRX)는 인증키가 필요합니다. TOKEN.env에 KRX_API_KEY를 추가하세요."
+            )
+        found = await krx_api.search_all_markets(query, bas_dd=date)
+        if not found:
+            return None
+        market, row = found
+        rate = row.get("FLUC_RT")
+        try:
+            rate_val = float(str(rate).replace(",", ""))
+        except (TypeError, ValueError):
+            rate_val = None
+        day = str(date)
+        stamp = f"종가 {day[:4]}-{day[4:6]}-{day[6:]}" if len(day) == 8 else f"종가 {day}"
+        return {
+            "name": row.get("ISU_NM"), "code": row.get("ISU_CD"),
+            "market_label": krx_api.MARKET_LABELS.get(market, market),
+            "price": self._to_int(row.get("TDD_CLSPRC")),
+            "change": self._to_int(row.get("CMPPREVDD_PRC")),
+            "rate": rate_val,
+            "direction": ("up" if (rate_val or 0) > 0 else "down" if (rate_val or 0) < 0 else "flat"),
+            "open": self._to_int(row.get("TDD_OPNPRC")),
+            "high": self._to_int(row.get("TDD_HGPRC")),
+            "low": self._to_int(row.get("TDD_LWPRC")),
+            "volume": self._to_int(row.get("ACC_TRDVOL")),
+            "trade_value": (f"{self._to_int(row.get('ACC_TRDVAL')):,}원"
+                            if self._to_int(row.get("ACC_TRDVAL")) is not None else None),
+            "marketcap": (f"{self._to_int(row.get('MKTCAP')):,}원"
+                          if self._to_int(row.get("MKTCAP")) is not None else None),
+            "stamp": stamp,
+            "realtime": False, "market_open": False, "polling_ms": 0,
+            "source": "KRX",
+        }
 
     # ------------------------------------------------------------------ 대화(AI) API
     async def api_chat_models(self, request: web.Request) -> web.Response:

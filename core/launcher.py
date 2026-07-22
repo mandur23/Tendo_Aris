@@ -13,6 +13,7 @@ from cogs.chat_ai import ChatAI
 from cogs.trpg import TRPG
 from cogs.trpg_party import TRPGParty
 from cogs.trpg_world import TRPGWorld
+from cogs.stock import Stock
 from GameSystem.YachtDiceGame import YachtDiceGame
 from GameSystem.BlackjackGame import BlackjackGame
 from utils.config import DISCORD_BOT_TOKEN, COMMAND_PREFIX
@@ -37,6 +38,7 @@ async def load_cogs(bot: FuzzyBot):
     await bot.add_cog(TRPG(bot))
     await bot.add_cog(TRPGParty(bot))
     await bot.add_cog(TRPGWorld(bot))
+    await bot.add_cog(Stock(bot))
     await bot.add_cog(YachtDiceGame(bot))
     await bot.add_cog(BlackjackGame(bot))
 

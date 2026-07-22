@@ -43,6 +43,16 @@ if FFMPEG_PATH:
 DISCORD_BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN', '').strip()
 COMMAND_PREFIX = '!'
 
+# KRX 데이터 마켓플레이스 OPEN API (https://openapi.krx.co.kr/)
+# 마이페이지에서 발급받은 인증키를 TOKEN.env에 KRX_API_KEY=... 로 저장한다.
+KRX_API_KEY = os.getenv('KRX_API_KEY', '').strip()
+try:
+    KRX_TIMEOUT_SECONDS = int(os.getenv('KRX_TIMEOUT_SECONDS', '15'))
+except (TypeError, ValueError):
+    KRX_TIMEOUT_SECONDS = 15
+    if os.getenv('KRX_TIMEOUT_SECONDS') is not None:
+        logger.warning("KRX_TIMEOUT_SECONDS가 숫자가 아니에요. 15초를 사용할게요.")
+
 # 대화형 AI (로컬 LLM/Ollama) 설정
 LOCAL_AI_BASE_URL = os.getenv('LOCAL_AI_BASE_URL', 'http://127.0.0.1:11434').strip() or 'http://127.0.0.1:11434'
 LOCAL_AI_MODEL = os.getenv('LOCAL_AI_MODEL', 'llama3.1:8b').strip() or 'llama3.1:8b'
