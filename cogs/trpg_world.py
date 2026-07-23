@@ -22,6 +22,7 @@ from discord.ext import commands
 
 from GameSystem.TRPGEngine import (
     CLASSES,
+    roll_class_options,
     DEFAULT_DC,
     FREE_ACTION_DC,
     judge_free_action,
@@ -42,6 +43,7 @@ from utils.config import LOCAL_AI_MODEL
 from utils.discord_utils import AuthorLockedView, safe_defer, safe_edit_message
 from utils.file_utils import delete_trpg_world_save, load_trpg_world_saves, set_trpg_world_save
 from utils.llm_utils import check_model_available, is_local_ai_configured
+from utils.trpg_dice import player_roll_check
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +87,7 @@ class WorldOwnerClassSelectView(AuthorLockedView):
         self.key = key
         self.genre_key = genre_key
 
-        for class_key, spec in CLASSES.items():
+        for class_key, spec in roll_class_options(genre_key):
             btn = discord.ui.Button(label=f"{spec['emoji']} {spec['label']}", style=discord.ButtonStyle.primary)
             btn.callback = functools.partial(self._class_cb, class_key=class_key)
             self.add_item(btn)
@@ -106,12 +108,13 @@ class WorldOwnerClassSelectView(AuthorLockedView):
 class WorldJoinClassSelectView(AuthorLockedView):
     """합류하려는 사용자가 직업을 고르는 (ephemeral) 버튼 뷰."""
 
-    def __init__(self, cog: "TRPGWorld", key: WorldKey, user_id: int):
+    def __init__(self, cog: "TRPGWorld", key: WorldKey, user_id: int, genre_key: str = "fantasy"):
         super().__init__(author_id=user_id, timeout=SELECT_VIEW_TIMEOUT)
         self.cog = cog
         self.key = key
 
-        for class_key, spec in CLASSES.items():
+        # 합류할 세계의 장르에 맞는 직업을 제시한다.
+        for class_key, spec in roll_class_options(genre_key):
             btn = discord.ui.Button(label=f"{spec['emoji']} {spec['label']}", style=discord.ButtonStyle.primary)
             btn.callback = functools.partial(self._class_cb, class_key=class_key)
             self.add_item(btn)
@@ -606,7 +609,7 @@ class TRPGWorld(commands.Cog):
             await self.respond_ephemeral(interaction, f"세계가 가득 찼어요! (최대 {WORLD_MAX_MEMBERS}명)")
             return
 
-        view = WorldJoinClassSelectView(self, key, interaction.user.id)
+        view = WorldJoinClassSelectView(self, key, interaction.user.id, adv.genre_key)
         try:
             if not interaction.response.is_done():
                 await interaction.response.send_message("합류할 캐릭터의 직업을 선택하세요!", view=view, ephemeral=True)
@@ -732,7 +735,13 @@ class TRPGWorld(commands.Cog):
                 stat, dc = await asyncio.to_thread(
                     judge_free_action, action_text, actor, model=self._model()
                 )
-            check = roll_check(actor, stat, dc) if (stat or fate_roll) and not in_combat_action else None
+
+            needs_check = bool(stat or fate_roll) and not in_combat_action
+            # 자유 행동(직접 선언한 행동)은 행동한 본인이 주사위를 직접 굴린다.
+            # 선택지 버튼은 기존처럼 자동으로 굴린다.
+            manual_roll = needs_check and fate_roll
+
+            check = roll_check(actor, stat, dc) if needs_check and not manual_roll else None
 
             header = f"🕹️ **{actor.name}**: {action_text}"
             if check:
@@ -741,6 +750,11 @@ class TRPGWorld(commands.Cog):
                 await channel.send(header)
             except discord.HTTPException:
                 logger.debug("행동 로그 전송 실패 (무시됨)")
+
+            if manual_roll:
+                check = await player_roll_check(
+                    channel, actor, stat, dc, author_id=interaction.user.id
+                )
 
             try:
                 async with channel.typing():
@@ -881,7 +895,7 @@ class TRPGWorld(commands.Cog):
             await ctx.send(f"세계가 가득 찼어요! (최대 {WORLD_MAX_MEMBERS}명)", delete_after=10)
             return
 
-        view = WorldJoinClassSelectView(self, key, ctx.author.id)
+        view = WorldJoinClassSelectView(self, key, ctx.author.id, adv.genre_key)
         try:
             msg = await ctx.send(f"{ctx.author.mention} 합류할 캐릭터의 직업을 선택하세요!", view=view)
             view.message = msg

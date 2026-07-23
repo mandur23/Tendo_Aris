@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 STATS = ("힘", "민첩", "지능", "매력")
 DEFAULT_DC = 12
 FREE_ACTION_DC = 11          # 자유 행동은 스탯 보정 없는 '운명 판정'으로 처리
+DC_MIN = 8                   # 매우 쉬움
+DC_MAX = 18                  # 매우 어려움
 MAX_CHOICES = 4
 CHOICE_TEXT_MAX = 48         # 버튼 라벨 제한(80자)을 감안한 선택지 텍스트 길이
 NARRATION_MAX = 1500
@@ -59,36 +61,180 @@ GENRES: Dict[str, Dict[str, str]] = {
     },
 }
 
-CLASSES: Dict[str, Dict] = {
-    "warrior": {
-        "label": "전사",
-        "emoji": "🛡️",
-        "stats": {"힘": 3, "민첩": 1, "지능": 0, "매력": 1},
-        "hp": 26,
-        "items": ["낡은 검", "나무 방패", "회복 물약"],
+# ------------------------------------------------------------------ 직업
+# 직업은 네 가지 '원형'(밸런스 뼈대) 위에 장르에 맞는 이름·소지품을 입힌 것이다.
+# 어떤 장르를 골라도 힘/민첩/지능/매력 중심 네 갈래가 항상 제공되므로 밸런스는 동일하고,
+# 이름과 분위기만 이야기에 맞게 바뀐다.
+ARCHETYPES: Dict[str, Dict] = {
+    "brawn": {"stats": {"힘": 3, "민첩": 1, "지능": 0, "매력": 1}, "hp": 26},
+    "swift": {"stats": {"힘": 1, "민첩": 3, "지능": 1, "매력": 0}, "hp": 20},
+    "mind":  {"stats": {"힘": 0, "민첩": 1, "지능": 3, "매력": 1}, "hp": 18},
+    "charm": {"stats": {"힘": 0, "민첩": 1, "지능": 1, "매력": 3}, "hp": 20},
+}
+# 선택지에 보여줄 순서 (힘 → 민첩 → 지능 → 매력)
+ARCHETYPE_ORDER: Tuple[str, ...] = ("brawn", "swift", "mind", "charm")
+
+# 장르별 직업 후보. 모험을 시작할 때 원형마다 하나씩 무작위로 뽑아 4개를 제시한다.
+# 같은 장르라도 플레이할 때마다 직업 구성이 달라진다.
+GENRE_CLASSES: Dict[str, Dict[str, List[Dict]]] = {
+    "fantasy": {
+        "brawn": [
+            {"key": "warrior", "label": "전사", "emoji": "🛡️", "items": ["낡은 검", "나무 방패", "회복 물약"]},
+            {"key": "paladin", "label": "성기사", "emoji": "⚔️", "items": ["은빛 장검", "성표", "회복 물약"]},
+            {"key": "berserker", "label": "광전사", "emoji": "🪓", "items": ["양날 도끼", "가죽 갑옷", "회복 물약"]},
+        ],
+        "swift": [
+            {"key": "rogue", "label": "도적", "emoji": "🗡️", "items": ["단검", "자물쇠 따개", "회복 물약"]},
+            {"key": "ranger", "label": "궁수", "emoji": "🏹", "items": ["단궁", "화살통", "회복 물약"]},
+            {"key": "scout", "label": "정찰병", "emoji": "🧭", "items": ["사냥칼", "밧줄과 갈고리", "회복 물약"]},
+        ],
+        "mind": [
+            {"key": "mage", "label": "마법사", "emoji": "🔮", "items": ["수습 지팡이", "주문서", "회복 물약"]},
+            {"key": "alchemist", "label": "연금술사", "emoji": "⚗️", "items": ["시약 가방", "휴대용 증류기", "회복 물약"]},
+            {"key": "sage", "label": "현자", "emoji": "📚", "items": ["고문서 사본", "돋보기", "회복 물약"]},
+        ],
+        "charm": [
+            {"key": "bard", "label": "음유시인", "emoji": "🎻", "items": ["류트", "화려한 망토", "회복 물약"]},
+            {"key": "cleric", "label": "성직자", "emoji": "✨", "items": ["성서", "성수병", "회복 물약"]},
+            {"key": "merchant", "label": "행상인", "emoji": "💰", "items": ["잡화 보따리", "저울", "회복 물약"]},
+        ],
     },
-    "mage": {
-        "label": "마법사",
-        "emoji": "🔮",
-        "stats": {"힘": 0, "민첩": 1, "지능": 3, "매력": 1},
-        "hp": 18,
-        "items": ["수습 지팡이", "주문서", "회복 물약"],
+    "wuxia": {
+        "brawn": [
+            {"key": "wx_fist", "label": "권사", "emoji": "👊", "items": ["철사장갑", "단련용 모래주머니", "금창약"]},
+            {"key": "wx_blade", "label": "도객", "emoji": "🗡️", "items": ["박도", "가죽 호구", "금창약"]},
+            {"key": "wx_guard", "label": "표사", "emoji": "🐎", "items": ["철곤", "표국 인장", "금창약"]},
+        ],
+        "swift": [
+            {"key": "wx_sword", "label": "검객", "emoji": "⚔️", "items": ["세검", "검집 장식", "금창약"]},
+            {"key": "wx_shadow", "label": "자객", "emoji": "🥷", "items": ["암기 주머니", "흑의", "금창약"]},
+            {"key": "wx_wind", "label": "경공술사", "emoji": "🌬️", "items": ["경신화", "비단 허리띠", "금창약"]},
+        ],
+        "mind": [
+            {"key": "wx_doctor", "label": "신의", "emoji": "🌿", "items": ["약초 상자", "은침", "금창약"]},
+            {"key": "wx_array", "label": "진법가", "emoji": "📜", "items": ["진법도", "나침반", "금창약"]},
+            {"key": "wx_mech", "label": "기관술사", "emoji": "⚙️", "items": ["기관 부품", "정교한 공구", "금창약"]},
+        ],
+        "charm": [
+            {"key": "wx_talker", "label": "세객", "emoji": "🗣️", "items": ["서찰 묶음", "명첩", "금창약"]},
+            {"key": "wx_music", "label": "악사", "emoji": "🎵", "items": ["비파", "부채", "금창약"]},
+            {"key": "wx_chief", "label": "방주", "emoji": "🏮", "items": ["방파 신물", "전낭", "금창약"]},
+        ],
     },
-    "rogue": {
-        "label": "도적",
-        "emoji": "🗡️",
-        "stats": {"힘": 1, "민첩": 3, "지능": 1, "매력": 0},
-        "hp": 20,
-        "items": ["단검", "자물쇠 따개", "회복 물약"],
+    "sf": {
+        "brawn": [
+            {"key": "sf_trooper", "label": "강화병", "emoji": "🦾", "items": ["강화 외골격", "펄스 라이플", "나노 응급킷"]},
+            {"key": "sf_marine", "label": "우주해병", "emoji": "🪖", "items": ["전투복", "자기 유탄", "나노 응급킷"]},
+            {"key": "sf_miner", "label": "채굴기사", "emoji": "⛏️", "items": ["플라즈마 절단기", "자석 부츠", "나노 응급킷"]},
+        ],
+        "swift": [
+            {"key": "sf_pilot", "label": "파일럿", "emoji": "🛰️", "items": ["비행 슈트", "조종 인터페이스", "나노 응급킷"]},
+            {"key": "sf_infil", "label": "잠입요원", "emoji": "👤", "items": ["광학 위장막", "소음 권총", "나노 응급킷"]},
+            {"key": "sf_acrobat", "label": "무중력 곡예사", "emoji": "🌀", "items": ["추진 팩", "자기 그립", "나노 응급킷"]},
+        ],
+        "mind": [
+            {"key": "sf_engineer", "label": "엔지니어", "emoji": "🔧", "items": ["다목적 공구", "진단 태블릿", "나노 응급킷"]},
+            {"key": "sf_science", "label": "과학장교", "emoji": "🔬", "items": ["휴대 분석기", "표본 용기", "나노 응급킷"]},
+            {"key": "sf_ai", "label": "AI 조율사", "emoji": "🤖", "items": ["신경 링크", "보조 드론", "나노 응급킷"]},
+        ],
+        "charm": [
+            {"key": "sf_envoy", "label": "외교관", "emoji": "🕊️", "items": ["번역 임플란트", "외교 신임장", "나노 응급킷"]},
+            {"key": "sf_broker", "label": "협상가", "emoji": "💼", "items": ["신용 칩", "계약 단말", "나노 응급킷"]},
+            {"key": "sf_anchor", "label": "방송사관", "emoji": "📡", "items": ["홀로 카메라", "중계 송신기", "나노 응급킷"]},
+        ],
     },
-    "bard": {
-        "label": "음유시인",
-        "emoji": "🎻",
-        "stats": {"힘": 0, "민첩": 1, "지능": 1, "매력": 3},
-        "hp": 20,
-        "items": ["류트", "화려한 망토", "회복 물약"],
+    "horror": {
+        "brawn": [
+            {"key": "hr_fire", "label": "소방관", "emoji": "🧯", "items": ["도끼", "방화복", "구급 상자"]},
+            {"key": "hr_guard", "label": "야간 경비원", "emoji": "🔦", "items": ["삼단봉", "손전등", "구급 상자"]},
+            {"key": "hr_athlete", "label": "운동선수", "emoji": "🏋️", "items": ["야구 배트", "테이핑", "구급 상자"]},
+        ],
+        "swift": [
+            {"key": "hr_runner", "label": "프리러너", "emoji": "🏃", "items": ["경량 배낭", "장갑", "구급 상자"]},
+            {"key": "hr_photo", "label": "사진기자", "emoji": "📷", "items": ["카메라", "플래시", "구급 상자"]},
+            {"key": "hr_medic", "label": "응급구조사", "emoji": "🚑", "items": ["구조 가위", "무전기", "구급 상자"]},
+        ],
+        "mind": [
+            {"key": "hr_occult", "label": "오컬트 연구자", "emoji": "📖", "items": ["낡은 고서", "부적", "구급 상자"]},
+            {"key": "hr_forensic", "label": "법의학자", "emoji": "🔬", "items": ["검시 가방", "채취 키트", "구급 상자"]},
+            {"key": "hr_psychic", "label": "심령학자", "emoji": "🔮", "items": ["EMF 측정기", "녹음기", "구급 상자"]},
+        ],
+        "charm": [
+            {"key": "hr_dj", "label": "라디오 DJ", "emoji": "🎙️", "items": ["휴대 마이크", "방송 수첩", "구급 상자"]},
+            {"key": "hr_counsel", "label": "상담사", "emoji": "☕", "items": ["상담 수첩", "보온병", "구급 상자"]},
+            {"key": "hr_shaman", "label": "무당", "emoji": "🪬", "items": ["방울", "부적 묶음", "구급 상자"]},
+        ],
+    },
+    "cyberpunk": {
+        "brawn": [
+            {"key": "cp_merc", "label": "사이보그 용병", "emoji": "🦾", "items": ["의체 팔", "스마트 권총", "응급 스팀팩"]},
+            {"key": "cp_fighter", "label": "스트리트 파이터", "emoji": "🥊", "items": ["강화 너클", "낡은 재킷", "응급 스팀팩"]},
+            {"key": "cp_bodyguard", "label": "보디가드", "emoji": "🕶️", "items": ["방탄 코트", "충격 방패", "응급 스팀팩"]},
+        ],
+        "swift": [
+            {"key": "cp_courier", "label": "러너", "emoji": "🛹", "items": ["전동 보드", "암호화 배낭", "응급 스팀팩"]},
+            {"key": "cp_sniper", "label": "저격수", "emoji": "🎯", "items": ["접이식 저격총", "열화상 스코프", "응급 스팀팩"]},
+            {"key": "cp_ghost", "label": "잠입자", "emoji": "🌃", "items": ["스텔스 필드", "전자 열쇠", "응급 스팀팩"]},
+        ],
+        "mind": [
+            {"key": "cp_hacker", "label": "해커", "emoji": "💻", "items": ["사이버덱", "침투 프로그램", "응급 스팀팩"]},
+            {"key": "cp_tech", "label": "기술자", "emoji": "🔩", "items": ["납땜 키트", "부품 상자", "응급 스팀팩"]},
+            {"key": "cp_data", "label": "데이터 브로커", "emoji": "📊", "items": ["암호 드라이브", "위조 신분증", "응급 스팀팩"]},
+        ],
+        "charm": [
+            {"key": "cp_fixer", "label": "픽서", "emoji": "🤝", "items": ["연락처 단말", "비상 크레딧", "응급 스팀팩"]},
+            {"key": "cp_streamer", "label": "스트리머", "emoji": "📱", "items": ["드론 카메라", "홀로 마이크", "응급 스팀팩"]},
+            {"key": "cp_dealer", "label": "정보상", "emoji": "🃏", "items": ["암시장 단말", "위조 칩", "응급 스팀팩"]},
+        ],
     },
 }
+
+
+def _build_class_registry() -> Dict[str, Dict]:
+    """장르별 직업 정의를 key -> 완성된 스펙 형태로 펼친다.
+
+    TRPGCharacter.create(name, class_key) 가 장르와 무관하게 동작하도록,
+    모든 장르의 직업을 하나의 레지스트리로 합쳐 둔다.
+    """
+    registry: Dict[str, Dict] = {}
+    for genre_key, by_archetype in GENRE_CLASSES.items():
+        for archetype, entries in by_archetype.items():
+            base = ARCHETYPES[archetype]
+            for entry in entries:
+                registry[entry["key"]] = {
+                    "label": entry["label"],
+                    "emoji": entry["emoji"],
+                    "stats": dict(base["stats"]),
+                    "hp": base["hp"],
+                    "items": list(entry["items"]),
+                    "archetype": archetype,
+                    "genre": genre_key,
+                }
+    return registry
+
+
+# 전체 직업 레지스트리 (key -> 스펙). 세이브/캐릭터 생성은 이 키를 그대로 쓴다.
+CLASSES: Dict[str, Dict] = _build_class_registry()
+
+
+def roll_class_options(genre_key: str, rng: Optional[random.Random] = None) -> List[Tuple[str, Dict]]:
+    """장르에 맞는 직업 후보를 원형마다 하나씩 무작위로 뽑아 돌려준다.
+
+    항상 힘/민첩/지능/매력 중심 네 갈래가 나오므로 밸런스는 유지되고,
+    같은 장르를 골라도 매번 다른 직업 조합이 제시된다.
+    모르는 장르면 판타지 목록으로 대체한다.
+    """
+    picker = rng or random
+    by_archetype = GENRE_CLASSES.get(genre_key) or GENRE_CLASSES["fantasy"]
+
+    options: List[Tuple[str, Dict]] = []
+    for archetype in ARCHETYPE_ORDER:
+        entries = by_archetype.get(archetype)
+        if not entries:
+            continue
+        chosen = picker.choice(entries)
+        options.append((chosen["key"], CLASSES[chosen["key"]]))
+    return options
 
 # LLM 응답이 깨졌을 때 게임이 멈추지 않도록 쓰는 기본 선택지.
 FALLBACK_CHOICES: List[Dict] = [
@@ -222,6 +368,37 @@ FREE_ACTION_KEYWORDS: Dict[str, tuple] = {
 # 키워드로 판정 능력치를 찾았을 때 쓰는 기본 난이도 (보정을 받으므로 운명 판정보다 살짝 높다).
 FREE_ACTION_STAT_DC = DEFAULT_DC
 
+# 행동 문장에 담긴 난이도 단서로 기본 난이도를 조정한다.
+# 대상의 규모/상태(거대한·낡은), 수행 방식(단숨에·천천히), 상황의 위험도로 판단한다.
+#   예) "낡은 자물쇠를 천천히 딴다"        → 12 - 3 - 2 = 7 → 8 (하한)
+#       "굳게 잠긴 강철문을 단숨에 부순다" → 12 + 2 + 3 = 17
+FREE_ACTION_DC_MODIFIERS: Tuple[Tuple[int, Tuple[str, ...]], ...] = (
+    (-3, (  # 아주 쉬움: 대상이 작고 허술하거나, 행동 자체가 사소함
+        "사소한", "간단히", "간단한", "살짝", "살며시", "가볍게", "가벼운", "잠깐",
+        "대충", "쉽게", "쉬운", "손쉽게", "작은", "조그만", "얇은", "낡은", "삭은",
+        "부서진", "부러진", "느슨한", "헐거운", "열려 있는", "열린",
+    )),
+    (-2, (  # 쉬움: 시간을 들이거나 유리한 조건에서 수행
+        "천천히", "차분히", "차근차근", "신중히", "신중하게", "조심스럽게", "조심스레",
+        "조심히", "하나씩", "찬찬히", "가까이", "가까운", "눈앞", "바로 앞", "근처",
+    )),
+    (2, (  # 어려움: 서두르거나, 대상이 견고하거나, 조건이 나쁨
+        "재빨리", "재빠르게", "잽싸게", "단숨에", "한 번에", "한번에", "한꺼번에",
+        "서둘러", "급히", "황급히", "동시에", "여러", "멀리", "멀리서", "높은", "높이",
+        "깊은", "어두운", "어둠 속", "들키지 않고", "소리 없이", "소리없이",
+        "무거운", "두꺼운", "단단한", "굳게", "잠긴", "잠겨", "복잡한", "정교한",
+        "낯선", "처음 보는",
+    )),
+    (3, (  # 매우 어려움: 압도적인 대상이거나 목숨이 걸린 상황
+        "거대한", "육중한", "엄청난", "강철", "쇠창살", "철문", "바위", "성문",
+        "절벽", "낭떠러지", "필사적", "전력을", "온 힘", "혼신", "죽을힘", "목숨을",
+        "불길", "화염", "폭풍", "격류", "맹독", "삼엄한", "무장한", "함정투성이", "불가능",
+    )),
+)
+# 단서가 몰려도 난이도가 한쪽으로 쏠리지 않도록 보정 총합을 제한한다.
+FREE_ACTION_DC_DELTA_MIN = -4
+FREE_ACTION_DC_DELTA_MAX = 5
+
 FREE_ACTION_JUDGE_SYSTEM = (
     "당신은 TRPG 게임 마스터의 판정 보조입니다. 플레이어가 선언한 자유 행동에 대해 "
     "어떤 능력치로 판정할지와 난이도를 정하세요.\n"
@@ -260,6 +437,26 @@ def _keyword_stat(action_text: str) -> Optional[str]:
     return best_stat
 
 
+def _keyword_dc(action_text: str, base: int = FREE_ACTION_STAT_DC) -> int:
+    """행동 문장의 난이도 단서로 판정 난이도를 정한다.
+
+    같은 등급의 단서가 여러 개 걸려도 한 번만 반영하고, 반대 방향 단서는 서로
+    상쇄된다(예: "거대한 바위를 천천히 밀어본다" → +3 -2 = +1).
+    단서가 하나도 없으면 기본 난이도를 그대로 쓴다.
+    """
+    text = (action_text or "").strip()
+    if not text:
+        return base
+
+    delta = 0
+    for weight, keywords in FREE_ACTION_DC_MODIFIERS:
+        if any(keyword in text for keyword in keywords):
+            delta += weight
+
+    delta = max(FREE_ACTION_DC_DELTA_MIN, min(FREE_ACTION_DC_DELTA_MAX, delta))
+    return max(DC_MIN, min(DC_MAX, base + delta))
+
+
 def judge_free_action(
     action_text: str,
     character: Optional["TRPGCharacter"] = None,
@@ -275,7 +472,8 @@ def judge_free_action(
     """
     stat = _keyword_stat(action_text)
     if stat is not None:
-        return stat, FREE_ACTION_STAT_DC
+        # 능력치가 정해지면 난이도도 행동 문장의 단서에 맞춰 조정한다.
+        return stat, _keyword_dc(action_text)
 
     if not use_llm:
         return None, FREE_ACTION_DC
@@ -305,7 +503,7 @@ def judge_free_action(
         dc = int(data.get("dc", FREE_ACTION_STAT_DC))
     except (TypeError, ValueError):
         dc = FREE_ACTION_STAT_DC
-    dc = max(8, min(18, dc))
+    dc = max(DC_MIN, min(DC_MAX, dc))
 
     if stat is None:
         # '없음' 판단이거나 형식이 어긋난 경우 — 보정 없는 운명 판정으로 처리한다.
@@ -932,7 +1130,7 @@ def _normalize_choices(raw) -> List[Dict]:
             dc = int(item.get("dc", DEFAULT_DC))
         except (TypeError, ValueError):
             dc = DEFAULT_DC
-        dc = max(8, min(18, dc))
+        dc = max(DC_MIN, min(DC_MAX, dc))
         choices.append({"text": text, "stat": stat, "dc": dc})
     return choices or [dict(c) for c in FALLBACK_CHOICES]
 

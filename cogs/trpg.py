@@ -17,6 +17,7 @@ from discord.ext import commands
 
 from GameSystem.TRPGEngine import (
     CLASSES,
+    roll_class_options,
     DEFAULT_DC,
     FREE_ACTION_DC,
     judge_free_action,
@@ -34,6 +35,7 @@ from utils.config import LOCAL_AI_MODEL
 from utils.discord_utils import AuthorLockedView, safe_defer, safe_edit_message
 from utils.file_utils import delete_trpg_save, load_trpg_saves, set_trpg_save
 from utils.llm_utils import check_model_available, is_local_ai_configured
+from utils.trpg_dice import player_roll_check
 
 logger = logging.getLogger(__name__)
 
@@ -71,13 +73,13 @@ class GenreSelectView(AuthorLockedView):
 class ClassSelectView(AuthorLockedView):
     """주인공 직업을 고르는 버튼 뷰."""
 
-    def __init__(self, cog: "TRPG", key: SessionKey, genre_key: str):
+    def __init__(self, cog: "TRPG", key: SessionKey, genre_key: str, options: list):
         super().__init__(author_id=key[2], timeout=SELECT_VIEW_TIMEOUT)
         self.cog = cog
         self.key = key
         self.genre_key = genre_key
 
-        for class_key, spec in CLASSES.items():
+        for class_key, spec in options:
             btn = discord.ui.Button(label=f"{spec['emoji']} {spec['label']}", style=discord.ButtonStyle.primary)
             btn.callback = functools.partial(self._class_cb, class_key=class_key)
             self.add_item(btn)
@@ -372,14 +374,16 @@ class TRPG(commands.Cog):
             description=f"{genre['hint']}.\n\n주인공의 직업을 선택하세요! 직업을 고르면 이름·종족·배경을 입력할 수 있어요.",
             color=0x9B59B6,
         )
-        for spec in CLASSES.values():
+        # 장르에 맞는 직업을 매번 새로 뽑는다. 버튼과 설명이 어긋나지 않도록 한 번만 뽑아 공유한다.
+        options = roll_class_options(genre_key)
+        for _, spec in options:
             stats = " / ".join(f"{k} +{v}" if v > 0 else f"{k} {v}" for k, v in spec["stats"].items())
             embed.add_field(
                 name=f"{spec['emoji']} {spec['label']}",
                 value=f"HP {spec['hp']}\n{stats}\n소지품: {', '.join(spec['items'])}",
                 inline=True,
             )
-        view = ClassSelectView(self, key, genre_key)
+        view = ClassSelectView(self, key, genre_key, options)
         try:
             await interaction.response.edit_message(embed=embed, view=view)
             view.message = interaction.message
@@ -517,7 +521,13 @@ class TRPG(commands.Cog):
                 stat, dc = await asyncio.to_thread(
                     judge_free_action, action_text, adv.character, model=self._model()
                 )
-            check = roll_check(adv.character, stat, dc) if (stat or fate_roll) and not in_combat_action else None
+
+            needs_check = bool(stat or fate_roll) and not in_combat_action
+            # 자유 행동(직접 선언한 행동)은 플레이어가 주사위를 직접 굴린다.
+            # 선택지 버튼은 기존처럼 자동으로 굴린다.
+            manual_roll = needs_check and fate_roll
+
+            check = roll_check(adv.character, stat, dc) if needs_check and not manual_roll else None
 
             header = f"🕹️ **{adv.character.name}**: {action_text}"
             if check:
@@ -526,6 +536,11 @@ class TRPG(commands.Cog):
                 await channel.send(header)
             except discord.HTTPException:
                 logger.debug("행동 로그 전송 실패 (무시됨)")
+
+            if manual_roll:
+                check = await player_roll_check(
+                    channel, adv.character, stat, dc, author_id=interaction.user.id
+                )
 
             try:
                 async with channel.typing():

@@ -22,6 +22,7 @@ from discord.ext import commands
 
 from GameSystem.TRPGEngine import (
     CLASSES,
+    roll_class_options,
     DEFAULT_DC,
     FREE_ACTION_DC,
     judge_free_action,
@@ -39,6 +40,7 @@ from utils.config import LOCAL_AI_MODEL
 from utils.discord_utils import AuthorLockedView, safe_defer, safe_edit_message
 from utils.file_utils import delete_trpg_party_save, load_trpg_party_saves, set_trpg_party_save
 from utils.llm_utils import check_model_available, is_local_ai_configured
+from utils.trpg_dice import player_roll_check
 
 logger = logging.getLogger(__name__)
 
@@ -99,11 +101,13 @@ class PartyLobbyView(discord.ui.View):
         self.key = key
         self.lobby = lobby
 
-        for class_key, spec in CLASSES.items():
+        # 로비가 열릴 때 장르에 맞는 직업을 뽑아 고정한다 (참가자 모두 같은 목록을 본다).
+        self.class_options = roll_class_options(lobby.genre_key)
+        for idx, (class_key, spec) in enumerate(self.class_options):
             btn = discord.ui.Button(
                 label=f"{spec['emoji']} {spec['label']}",
                 style=discord.ButtonStyle.primary,
-                row=0 if list(CLASSES).index(class_key) < 2 else 1,
+                row=0 if idx < 2 else 1,
             )
             btn.callback = functools.partial(self._class_cb, class_key=class_key)
             self.add_item(btn)
@@ -746,7 +750,13 @@ class TRPGParty(commands.Cog):
                 stat, dc = await asyncio.to_thread(
                     judge_free_action, action_text, actor, model=self._model()
                 )
-            check = roll_check(actor, stat, dc) if (stat or fate_roll) and not in_combat_action else None
+
+            needs_check = bool(stat or fate_roll) and not in_combat_action
+            # 자유 행동(직접 선언한 행동)은 행동한 본인이 주사위를 직접 굴린다.
+            # 선택지 버튼은 기존처럼 자동으로 굴린다.
+            manual_roll = needs_check and fate_roll
+
+            check = roll_check(actor, stat, dc) if needs_check and not manual_roll else None
 
             header = f"🕹️ **{actor.name}**: {action_text}"
             if check:
@@ -755,6 +765,11 @@ class TRPGParty(commands.Cog):
                 await channel.send(header)
             except discord.HTTPException:
                 logger.debug("행동 로그 전송 실패 (무시됨)")
+
+            if manual_roll:
+                check = await player_roll_check(
+                    channel, actor, stat, dc, author_id=interaction.user.id
+                )
 
             try:
                 async with channel.typing():
