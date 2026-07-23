@@ -58,7 +58,6 @@ class MusicPlayer:
         self._tasks.append(self.bot.loop.create_task(self.player_loop()))
         self._tasks.append(self.bot.loop.create_task(self.register_voice_state_listener()))
         self._tasks.append(self.bot.loop.create_task(self.check_idle_timeout()))
-        self._tasks.append(self.bot.loop.create_task(self.track_playback_position()))
 
     @property
     def is_playing(self):
@@ -137,36 +136,37 @@ class MusicPlayer:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                if not self._shutdown:
-                    logger.debug(f"idle_timeout 체크 중 오류 (무시됨): {e}")
-                break
-
-    async def track_playback_position(self):
-        """재생 위치를 주기적으로 추적하여 업데이트합니다."""
-        import time
-        while not self._shutdown and not self.bot.is_closed():
-            try:
-                await asyncio.sleep(0.5)  # 0.5초마다 위치 업데이트
-                
                 if self._shutdown:
                     break
-                
-                # 재생 중이고 재생 시작 시간이 있고, 일시정지되지 않았을 때만 위치 업데이트
-                if (self.guild.voice_client and 
-                    self.guild.voice_client.is_playing() and 
-                    not self.guild.voice_client.is_paused() and
-                    self.playback_start_time and
-                    self.paused_at_time is None):  # 일시정지되지 않았을 때만
-                    current_time = time.time()
-                    elapsed = current_time - self.playback_start_time
-                    self.paused_at_position = max(0, elapsed)
-                    self.last_position_update = current_time
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                if not self._shutdown:
-                    logger.debug(f"재생 위치 추적 중 오류 (무시됨): {e}")
-                await asyncio.sleep(1)
+                # 일시적 오류로 유휴 감시가 영구히 멈추면 봇이 음성 채널에 계속 남게 되므로,
+                # 로그만 남기고 다음 주기를 계속 확인한다.
+                logger.debug(f"idle_timeout 체크 중 오류 (무시됨): {e}")
+                continue
+
+    def current_position(self) -> float:
+        """현재 재생 위치(초)를 계산해서 돌려줍니다.
+
+        위치는 playback_start_time 으로부터 유도되는 값이므로 주기적으로 갱신할
+        필요가 없다. 재생 중이면 지금 시각으로 계산하고, 멈춰 있으면 멈춘 시점에
+        기록해 둔 위치를 그대로 쓴다.
+        """
+        vc = self.guild.voice_client
+        paused = self.paused_at_time is not None or (vc is not None and vc.is_paused())
+        if not paused and self.playback_start_time:
+            return max(0.0, time.time() - self.playback_start_time)
+        return max(0.0, self.paused_at_position)
+
+    def mark_paused(self) -> None:
+        """일시정지 직전에 현재 위치를 확정 기록합니다."""
+        if self.playback_start_time:
+            self.paused_at_position = max(0.0, time.time() - self.playback_start_time)
+        self.last_position_update = time.time()
+
+    def mark_resumed(self) -> None:
+        """재개 시 기준 시각을 현재 위치만큼 앞당겨 다시 맞춥니다."""
+        now = time.time()
+        self.playback_start_time = now - max(0.0, self.paused_at_position)
+        self.last_position_update = now
 
     def update_voice_channel(self, channel):
         if channel:
@@ -308,6 +308,7 @@ class MusicPlayer:
 
             try:
                 if self.guild.voice_client and self.guild.voice_client.is_connected():
+                    self.mark_paused()
                     self.guild.voice_client.pause()
             except Exception as e:
                 logger.debug(f"일시정지 중 오류 (무시됨): {e}")
@@ -321,6 +322,7 @@ class MusicPlayer:
             if bot_channel and any(not m.bot for m in bot_channel.members):
                 try:
                     if self.guild.voice_client.is_paused():
+                        self.mark_resumed()
                         self.guild.voice_client.resume()
                 except Exception as e:
                     logger.debug(f"재개 중 오류 (무시됨): {e}")
@@ -626,9 +628,11 @@ class MusicPlayer:
                     return
                     
                 if self.guild.voice_client.is_paused():
+                    self.mark_resumed()
                     self.guild.voice_client.resume()
                     await interaction.response.send_message("선생님, 노래를 다시 재생할게요!", ephemeral=True, delete_after=3)
                 else:
+                    self.mark_paused()
                     self.guild.voice_client.pause()
                     await interaction.response.send_message("노래를 잠시 멈췄어요. 계속 들으시려면 다시 눌러주세요, 선생님!", ephemeral=True,
                                                             delete_after=3)

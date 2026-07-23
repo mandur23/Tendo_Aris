@@ -43,6 +43,10 @@ class TTS(commands.Cog):
         self._playback_locks = {}
         # 음성 연결 경합 방지 락 (guild_id -> asyncio.Lock)
         self._voice_connect_locks = {}
+        # 설정 저장 직렬화용 락과, 백그라운드 저장 태스크 참조 보관
+        # (참조를 들고 있지 않으면 태스크가 GC 될 수 있다)
+        self._settings_write_lock = asyncio.Lock()
+        self._settings_save_tasks: set = set()
 
     def _get_playback_lock(self, guild_id: int) -> asyncio.Lock:
         if guild_id not in self._playback_locks:
@@ -74,8 +78,36 @@ class TTS(commands.Cog):
         return self._voice_connect_locks[guild_id]
 
     def save_settings(self):
-        """TTS 설정을 저장합니다."""
-        save_tts_settings(self.tts_settings)
+        """TTS 설정을 저장합니다.
+
+        설정 변경은 명령 처리(코루틴) 중에 자주 일어나므로, 파일 쓰기는
+        백그라운드 스레드로 넘겨 이벤트 루프를 막지 않는다.
+        - 쓰는 도중 설정이 바뀌어도 안전하도록 스냅샷을 넘긴다.
+        - 저장 순서가 뒤바뀌지 않도록 락으로 직렬화한다.
+        이벤트 루프 밖(테스트 등)에서 호출되면 기존처럼 동기 저장한다.
+        """
+        # 손상된 설정(값이 dict 가 아닌 경우)에서도 기존처럼 저장되도록 방어적으로 복사한다.
+        snapshot = {
+            key: dict(value) if isinstance(value, dict) else value
+            for key, value in self.tts_settings.items()
+        }
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            save_tts_settings(snapshot)
+            return
+
+        task = loop.create_task(self._save_settings_async(snapshot))
+        self._settings_save_tasks.add(task)
+        task.add_done_callback(self._settings_save_tasks.discard)
+
+    async def _save_settings_async(self, snapshot: dict) -> None:
+        """스냅샷을 스레드에서 저장한다. 실패해도 명령 처리를 막지 않는다."""
+        async with self._settings_write_lock:
+            try:
+                await asyncio.to_thread(save_tts_settings, snapshot)
+            except Exception as e:
+                logger.error(f"TTS 설정 저장 실패: {e}")
 
     def get_user_settings(self, user_id: int, guild_id: int):
         """사용자의 TTS 설정을 가져옵니다."""
@@ -501,6 +533,15 @@ class TTS(commands.Cog):
                 logger.warning("TTS 재생 실패, 대기열의 다음 항목 처리 시도")
 
             self.playing[guild.id] = False
+
+    @commands.Cog.listener()
+    async def on_guild_remove(self, guild):
+        """봇이 길드에서 나가면 그 길드용 상태를 정리합니다 (길드별 딕셔너리 누적 방지)."""
+        for store in (
+            self._playback_locks, self._voice_connect_locks,
+            self.tts_queue, self.playing, self.active_users,
+        ):
+            store.pop(guild.id, None)
 
     @commands.Cog.listener()
     async def on_message(self, message):

@@ -10,6 +10,7 @@ rapidfuzz 퍼지 매칭으로 질의와 관련된 청크를 찾아 반환한다.
 """
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -34,6 +35,11 @@ MAX_FILE_BYTES = 1024 * 1024  # 파일당 1MB 상한 (실수로 넣은 대용량
 # (파일 경로, mtime_ns, size) 서명이 같으면 캐시를 재사용한다.
 _cache_signature: Optional[Tuple] = None
 _cache_chunks: List[Dict] = []
+
+# 변경 감지용 폴더 스캔(rglob + stat)은 대화 메시지마다 일어나므로,
+# 이 간격 안에서는 재스캔을 건너뛴다. (문서 수정 반영이 최대 이만큼 늦어짐)
+SCAN_MIN_INTERVAL_SECONDS = 5.0
+_last_scan_at: float = 0.0
 
 
 def _split_chunks(text: str, max_chars: int = CHUNK_MAX_CHARS) -> List[str]:
@@ -99,7 +105,22 @@ def _rebuild_cache(signature: Tuple) -> None:
     logger.info(f"지식 문서 캐시 재구축: 파일 {len(signature)}개, 청크 {len(chunks)}개")
 
 
-def _ensure_cache() -> List[Dict]:
+def _ensure_cache(force: bool = False) -> List[Dict]:
+    """캐시를 최신 상태로 유지한다.
+
+    변경 감지 스캔이 매 호출마다 일어나지 않도록 SCAN_MIN_INTERVAL_SECONDS 동안은
+    건너뛴다. 문서 목록을 즉시 반영해야 하는 곳(관리 명령)은 force=True 로 부른다.
+    """
+    global _last_scan_at
+    now = time.monotonic()
+    if (
+        not force
+        and _cache_signature is not None
+        and (now - _last_scan_at) < SCAN_MIN_INTERVAL_SECONDS
+    ):
+        return _cache_chunks
+
+    _last_scan_at = now
     signature = _scan_signature()
     if signature != _cache_signature:
         _rebuild_cache(signature)
@@ -108,7 +129,8 @@ def _ensure_cache() -> List[Dict]:
 
 def knowledge_stats() -> Dict:
     """지식 문서 폴더 상태를 반환한다: {'dir', 'files': [이름...], 'chunks': 개수}."""
-    chunks = _ensure_cache()
+    # 관리 명령으로 조회하는 값이므로 항상 최신 상태를 확인한다.
+    chunks = _ensure_cache(force=True)
     files = sorted({chunk["file"] for chunk in chunks})
     return {"dir": str(KNOWLEDGE_DIR), "files": files, "chunks": len(chunks)}
 

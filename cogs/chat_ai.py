@@ -12,8 +12,10 @@
 아리스 페르소나: 모바일 게임 '블루 아카이브' 의 텐도 아리스 (게임 개발부 / 자칭 용사).
 """
 import asyncio
+import copy
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import date
@@ -46,6 +48,7 @@ from utils.llm_utils import (
     contains_non_korean,
     extract_json_object,
     ollama_chat_sync,
+    run_llm,
     strip_non_korean,
 )
 from utils.web_search import search_web
@@ -108,6 +111,8 @@ SYSTEM_PROMPT = (
 )
 
 SESSION_IDLE_TIMEOUT = 600           # 초. 이 시간 동안 메시지 없으면 세션 자동 종료.
+# TRPG 세이브 파일을 대화 메시지마다 전부 다시 읽지 않도록 하는 캐시 수명(초).
+SAVES_CACHE_TTL_SECONDS = 5.0
 SESSION_HISTORY_MAX_TURNS = 6        # 요약 압축 후 유지할 최근 user/assistant 메시지 쌍 수.
 SESSION_SUMMARY_MAX_CHARS = 700      # 굴러가는 요약(rolling summary) 길이 상한.
 # 히스토리가 이 개수를 넘으면 오래된 부분을 요약으로 압축한다.
@@ -136,6 +141,20 @@ WEB_SEARCH_DECISION_SYSTEM = (
 WEB_SEARCH_DECISION_NUM_PREDICT = 150
 # 이 길이 미만의 메시지(ㅋㅋ, 응 등)는 검색 판단 호출 자체를 생략한다.
 WEB_SEARCH_MIN_PROMPT_CHARS = 4
+
+# 검색 판단 LLM 호출은 메시지마다 일어나 응답 지연을 크게 늘린다.
+# 질문·정보요청·최신성 신호가 하나도 없는 잡담이면 판단 호출 자체를 건너뛴다.
+# (조금이라도 신호가 있으면 기존대로 LLM 이 판단하므로 판단 품질은 유지된다)
+WEB_SEARCH_HINT_RE = re.compile(
+    "[?？]"
+    "|뭐|무엇|무슨|어떤|어떻|어디|언제|누구|누가|왜|얼마|몇|이유"
+    "|알려|가르쳐|찾아|검색|추천|비교|정리|설명|방법|정보|소식|뉴스"
+    "|날씨|기온|시세|주가|환율|순위|가격|출시|일정|결과"
+    "|최근|최신|요즘|근래|오늘|어제|내일|지금|현재|올해|작년|내년"
+    r"|\d{4}\s*년|\d{1,2}\s*월"
+    "|나요|가요|까요|은가|인가|일까|을까|ㄹ까|맞아|맞나|어때",
+    re.IGNORECASE,
+)
 
 # 오래된 대화를 압축할 때 쓰는 요약 전용 시스템 프롬프트 (페르소나와 무관).
 SUMMARY_SYSTEM_PROMPT = (
@@ -203,6 +222,8 @@ class ChatAI(commands.Cog):
         self._switch_notice: Optional[str] = None
         self._sessions: Dict[SessionKey, _ChatSession] = {}
         self._cleanup_task: Optional[asyncio.Task] = None
+        # 세이브 파일 읽기 캐시: 이름 -> (적재 시각, 데이터)
+        self._saves_cache: Dict[str, Tuple[float, dict]] = {}
 
     # ------------------------------------------------------------------ 공통 유틸
     async def delete_command_message(self, ctx):
@@ -442,17 +463,31 @@ class ChatAI(commands.Cog):
         if not prepared_prompt:
             raise ValueError("질문 내용이 비어있습니다.")
 
-        return await asyncio.to_thread(
+        return await run_llm(
             self._call_local_ai_sync, prepared_prompt, username, history, summary, extra_contexts
         )
 
     # ------------------------------------------------------------------ TRPG 모험 컨텍스트
+    def _load_saves_cached(self, name: str, loader) -> dict:
+        """세이브 파일 로드를 짧게 캐시한다.
+
+        대화 메시지마다 세이브 파일 전체를 다시 파싱하지 않도록 한다.
+        컨텍스트 구성용 읽기 전용 조회라 몇 초의 지연은 문제가 되지 않는다.
+        """
+        now = time.monotonic()
+        hit = self._saves_cache.get(name)
+        if hit and now - hit[0] < SAVES_CACHE_TTL_SECONDS:
+            return hit[1]
+        data = loader() or {}
+        self._saves_cache[name] = (now, data)
+        return data
+
     def _find_saved_adventure_sync(self, guild_id: int, channel_id: int, user_id: int) -> Optional[dict]:
         """디스크 세이브에서 이 사용자의 모험 데이터를 찾는다. 같은 채널 세이브를 우선한다."""
-        saves = load_trpg_saves()
+        saves = self._load_saves_cached("solo", load_trpg_saves)
         exact = saves.get(f"{guild_id}:{channel_id}:{user_id}")
         if isinstance(exact, dict):
-            return exact
+            return copy.deepcopy(exact)
         for key_str, data in saves.items():
             parts = key_str.split(":")
             if (
@@ -461,14 +496,15 @@ class ChatAI(commands.Cog):
                 and parts[2] == str(user_id)
                 and isinstance(data, dict)
             ):
-                return data
+                # 캐시된 원본이 호출부에서 변형되지 않도록 사본을 돌려준다.
+                return copy.deepcopy(data)
         return None
 
     def _find_party_adventure_sync(self, guild_id: int, channel_id: int) -> Optional[dict]:
         """디스크 세이브에서 이 채널의 파티 모험 데이터를 찾는다."""
-        saves = load_trpg_party_saves()
+        saves = self._load_saves_cached("party", load_trpg_party_saves)
         data = saves.get(f"{guild_id}:{channel_id}")
-        return data if isinstance(data, dict) else None
+        return copy.deepcopy(data) if isinstance(data, dict) else None
 
     async def _gather_party_context(self, guild_id: int, channel_id: int, user: discord.abc.User) -> str:
         """이 채널의 파티 모험에 사용자가 참가 중이면 컨텍스트 블록을 만든다."""
@@ -535,9 +571,9 @@ class ChatAI(commands.Cog):
 
     def _find_world_adventure_sync(self, guild_id: int, channel_id: int) -> Optional[dict]:
         """디스크 세이브에서 이 채널의 자유 모험(공유 세계) 데이터를 찾는다."""
-        saves = load_trpg_world_saves()
+        saves = self._load_saves_cached("world", load_trpg_world_saves)
         data = saves.get(f"{guild_id}:{channel_id}")
-        return data if isinstance(data, dict) else None
+        return copy.deepcopy(data) if isinstance(data, dict) else None
 
     async def _gather_world_context(self, guild_id: int, channel_id: int, user: discord.abc.User) -> str:
         """이 채널의 자유 모험 세계에 사용자가 참가 중이면 컨텍스트 블록을 만든다."""
@@ -749,11 +785,15 @@ class ChatAI(commands.Cog):
         """
         if not LOCAL_AI_WEB_SEARCH_ENABLED:
             return ""
-        if len(prompt.strip()) < WEB_SEARCH_MIN_PROMPT_CHARS:
+        stripped = prompt.strip()
+        if len(stripped) < WEB_SEARCH_MIN_PROMPT_CHARS:
+            return ""
+        # 질문·최신성 신호가 전혀 없는 잡담이면 판단용 LLM 호출을 생략한다.
+        if not WEB_SEARCH_HINT_RE.search(stripped):
             return ""
 
         try:
-            query = await asyncio.to_thread(
+            query = await run_llm(
                 self._decide_web_search_sync, prompt, session.history
             )
         except Exception as e:
@@ -848,7 +888,7 @@ class ChatAI(commands.Cog):
         keep_msgs = SESSION_HISTORY_MAX_TURNS * 2
         overflow = session.history[:-keep_msgs]
         try:
-            new_summary = await asyncio.to_thread(
+            new_summary = await run_llm(
                 self._summarize_sync, session.summary, overflow
             )
         except Exception as e:
@@ -1056,6 +1096,23 @@ class ChatAI(commands.Cog):
         await self._respond(ctx, key, prompt.strip(), author_name=ctx.author.display_name)
         await self.delete_command_message(ctx)
 
+    async def _gather_contexts(self, ctx, prompt: str, session: "_ChatSession"):
+        """응답에 붙일 컨텍스트(TRPG·지식문서·웹검색)를 동시에 수집한다.
+
+        세 가지는 서로 의존하지 않으므로 순차로 기다릴 이유가 없다.
+        하나라도 실패하면 기존과 동일하게 예외를 올려 상위에서 처리한다.
+        """
+        results = await asyncio.gather(
+            self._gather_trpg_context(ctx.guild, ctx.channel, ctx.author),
+            asyncio.to_thread(self._gather_knowledge_context_sync, prompt),
+            self._maybe_web_search(ctx, prompt, session),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+        return results
+
     async def _respond(
         self,
         ctx,
@@ -1080,13 +1137,9 @@ class ChatAI(commands.Cog):
 
             try:
                 async with safe_typing(ctx):
-                    trpg_context = await self._gather_trpg_context(
-                        ctx.guild, ctx.channel, ctx.author
+                    trpg_context, knowledge_context, web_context = await self._gather_contexts(
+                        ctx, prompt, session
                     )
-                    knowledge_context = await asyncio.to_thread(
-                        self._gather_knowledge_context_sync, prompt
-                    )
-                    web_context = await self._maybe_web_search(ctx, prompt, session)
                     reply = await self._generate_ai_reply(
                         prompt, author_name,
                         history=session.history, summary=session.summary,

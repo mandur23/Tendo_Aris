@@ -175,8 +175,7 @@ async def save_history_to_db(history: Dict[str, List[Dict[str, Any]]]):
             await conn.begin()
             try:
                 async with conn.cursor() as cur:
-                    # 모든 히스토리를 삭제하고 재삽입 (간단한 구현)
-                    # 더 나은 방법은 변경사항만 업데이트하는 것이지만, 현재는 전체 교체
+                    # 길드별로 전체 교체한다. 항목마다 왕복하지 않도록 executemany 로 배치 삽입한다.
                     for guild_id_str, items in history.items():
                         guild_id = int(guild_id_str)
 
@@ -186,19 +185,27 @@ async def save_history_to_db(history: Dict[str, List[Dict[str, Any]]]):
                             (guild_id,)
                         )
 
-                        # 새 히스토리 삽입
+                        rows = []
                         for item in items:
-                            played_at = datetime.strptime(item['played_at'], '%Y-%m-%d %H:%M:%S')
-                            await cur.execute("""
+                            try:
+                                played_at = datetime.strptime(item['played_at'], '%Y-%m-%d %H:%M:%S')
+                            except (KeyError, TypeError, ValueError):
+                                # 형식이 깨진 항목 하나 때문에 전체 저장이 실패하지 않도록 건너뛴다.
+                                logger.warning(f"히스토리 항목 형식 오류로 건너뜀 (guild={guild_id}): {item!r:.120}")
+                                continue
+                            rows.append((
+                                guild_id,
+                                str(item.get('title', ''))[:500],  # VARCHAR(500) 제한
+                                str(item.get('url', ''))[:500],
+                                item.get('duration', 0),
+                                played_at,
+                            ))
+
+                        if rows:
+                            await cur.executemany("""
                                 INSERT INTO music_history (guild_id, title, url, duration, played_at)
                                 VALUES (%s, %s, %s, %s, %s)
-                            """, (
-                                guild_id,
-                                item['title'][:500],  # VARCHAR(500) 제한
-                                item['url'][:500],
-                                item['duration'],
-                                played_at
-                            ))
+                            """, rows)
 
                 await conn.commit()
             except Exception:
@@ -339,7 +346,7 @@ async def save_playlists_to_db(playlists: Dict[str, Dict[str, List[str]]]):
             await conn.begin()
             try:
                 async with conn.cursor() as cur:
-                    # 모든 플레이리스트를 삭제하고 재삽입
+                    # 소유자별로 전체 교체한다. URL 마다 왕복하지 않도록 executemany 로 배치 삽입한다.
                     for guild_id_str, playlist_dict in playlists.items():
                         guild_id = int(guild_id_str)
 
@@ -349,18 +356,17 @@ async def save_playlists_to_db(playlists: Dict[str, Dict[str, List[str]]]):
                             (guild_id,)
                         )
 
-                        # 새 플레이리스트 삽입
-                        for playlist_id, urls in playlist_dict.items():
-                            for position, url in enumerate(urls):
-                                await cur.execute("""
-                                    INSERT INTO playlists (guild_id, playlist_id, url, position)
-                                    VALUES (%s, %s, %s, %s)
-                                """, (
-                                    guild_id,
-                                    playlist_id,
-                                    url[:500],
-                                    position
-                                ))
+                        rows = [
+                            (guild_id, playlist_id, str(url)[:500], position)
+                            for playlist_id, urls in playlist_dict.items()
+                            for position, url in enumerate(urls)
+                        ]
+
+                        if rows:
+                            await cur.executemany("""
+                                INSERT INTO playlists (guild_id, playlist_id, url, position)
+                                VALUES (%s, %s, %s, %s)
+                            """, rows)
 
                 await conn.commit()
             except Exception:
@@ -410,16 +416,13 @@ async def save_playlist_to_db(guild_id: int, playlist_id: str, urls: List[str]):
                     )
 
                     if urls:
-                        for position, url in enumerate(urls):
-                            await cur.execute("""
-                                INSERT INTO playlists (guild_id, playlist_id, url, position)
-                                VALUES (%s, %s, %s, %s)
-                            """, (
-                                guild_id,
-                                playlist_id,
-                                url[:500],
-                                position
-                            ))
+                        await cur.executemany("""
+                            INSERT INTO playlists (guild_id, playlist_id, url, position)
+                            VALUES (%s, %s, %s, %s)
+                        """, [
+                            (guild_id, playlist_id, str(url)[:500], position)
+                            for position, url in enumerate(urls)
+                        ])
 
                 await conn.commit()
             except Exception:

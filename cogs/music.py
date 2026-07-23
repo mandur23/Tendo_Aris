@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import threading
 import time
 import discord
 from discord.ext import commands
@@ -29,7 +28,6 @@ class Music(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.players = {}
-        self._player_locks: dict[int, threading.Lock] = {}
         self.playlists = {} if USE_MYSQL else load_playlists()
         self.history = {} if USE_MYSQL else load_history()
         ensure_logs_dir()
@@ -39,19 +37,41 @@ class Music(commands.Cog):
         self.playlist_group = None
         self.history_group = None
 
+    def _history_snapshot(self) -> dict:
+        """저장 스레드에 넘길 히스토리 사본.
+
+        파일을 쓰는 동안 다른 코루틴이 self.history 를 바꿔도
+        "dictionary changed size during iteration" 이 나지 않도록 복사해서 넘긴다.
+        """
+        return {
+            gid: list(items) if isinstance(items, list) else items
+            for gid, items in self.history.items()
+        }
+
+    def _playlists_snapshot(self) -> dict:
+        """저장 스레드에 넘길 플레이리스트 사본."""
+        return {
+            uid: {
+                pid: list(urls) if isinstance(urls, list) else urls
+                for pid, urls in playlists.items()
+            } if isinstance(playlists, dict) else playlists
+            for uid, playlists in self.playlists.items()
+        }
+
     async def save_history(self):
         """히스토리를 저장합니다."""
         if USE_MYSQL:
             await save_history_to_db(self.history)
         else:
-            save_history(self.history)
+            # 파일 쓰기는 스레드로 넘겨 이벤트 루프를 막지 않는다.
+            await asyncio.to_thread(save_history, self._history_snapshot())
 
     async def save_playlists(self):
         """플레이리스트를 저장합니다."""
         if USE_MYSQL:
             await save_playlists_to_db(self.playlists)
         else:
-            save_playlists(self.playlists)
+            await asyncio.to_thread(save_playlists, self._playlists_snapshot())
 
     async def add_to_history(self, guild_id, source):
         """재생된 노래를 히스토리에 추가합니다. (오류 처리 개선)"""
@@ -95,8 +115,9 @@ class Music(commands.Cog):
                 
                 if len(self.history[guild_id_str]) > MAX_HISTORY_ITEMS:
                     self.history[guild_id_str] = self.history[guild_id_str][:MAX_HISTORY_ITEMS]
-                
-                save_history(self.history)
+
+                # 곡이 바뀔 때마다 호출되므로, 파일 쓰기로 이벤트 루프를 막지 않는다.
+                await asyncio.to_thread(save_history, self._history_snapshot())
         except Exception as e:
             logger.error(f"히스토리 저장 중 오류: {e}")
 
@@ -112,18 +133,16 @@ class Music(commands.Cog):
         except KeyError:
             pass
 
-    def _get_player_lock(self, guild_id: int) -> threading.Lock:
-        if guild_id not in self._player_locks:
-            self._player_locks[guild_id] = threading.Lock()
-        return self._player_locks[guild_id]
-
     def get_player(self, ctx):
-        with self._get_player_lock(ctx.guild.id):
-            if ctx.guild.id in self.players:
-                player = self.players[ctx.guild.id]
-            else:
-                player = MusicPlayer(ctx)
-                self.players[ctx.guild.id] = player
+        """길드의 MusicPlayer 를 가져오거나 없으면 만듭니다.
+
+        이 구간에는 await 가 없고 단일 이벤트 루프에서만 호출되므로,
+        중간에 다른 코루틴이 끼어들 수 없다. 별도 락이 필요하지 않다.
+        """
+        player = self.players.get(ctx.guild.id)
+        if player is None:
+            player = MusicPlayer(ctx)
+            self.players[ctx.guild.id] = player
 
         player.update_voice_channel_from_context(ctx)
         return player
@@ -272,13 +291,8 @@ class Music(commands.Cog):
             url = ''
             duration = 0
 
-        # 현재 재생 위치 계산 (TTS 재개용 위치 추적 정보 재활용)
-        if vc.is_paused() or player.paused_at_time is not None:
-            position = player.paused_at_position
-        elif player.playback_start_time:
-            position = max(0.0, time.time() - player.playback_start_time)
-        else:
-            position = player.paused_at_position
+        # 현재 재생 위치 (플레이어가 필요할 때 계산해서 돌려준다)
+        position = player.current_position()
 
         def _fmt(seconds):
             seconds = int(seconds)

@@ -3,10 +3,13 @@
 cogs/chat_ai.py 의 Ollama 연동 패턴을 다른 기능(TRPG 등)에서도 재사용할 수 있도록
 공용 함수로 제공한다. JSON 강제 출력(format: json)과 비-한국어 외래 문자 정리를 지원한다.
 """
+import asyncio
+import functools
 import json
 import logging
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional
 from urllib import error, request
 
@@ -24,6 +27,20 @@ logger = logging.getLogger(__name__)
 # 이 세마포어를 지나므로, 채널이 많아져도 단일 GPU에 요청이 몰리지 않는다.
 # (동기 함수들이 asyncio.to_thread 스레드에서 돌기 때문에 threading 세마포어를 쓴다)
 OLLAMA_SEMAPHORE = threading.BoundedSemaphore(LOCAL_AI_MAX_CONCURRENCY)
+
+# LLM 호출 전용 스레드풀.
+# asyncio.to_thread 의 기본 풀을 쓰면, 세마포어를 기다리는 LLM 호출이 워커를 오래
+# 붙잡아 같은 풀을 쓰는 파일 I/O·지식 검색 등이 굶을 수 있다. 전용 풀로 분리한다.
+LLM_EXECUTOR = ThreadPoolExecutor(
+    max_workers=max(2, LOCAL_AI_MAX_CONCURRENCY + 1),
+    thread_name_prefix="llm",
+)
+
+
+async def run_llm(func, *args, **kwargs):
+    """LLM 관련 동기 함수를 전용 스레드풀에서 실행한다 (asyncio.to_thread 대체)."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(LLM_EXECUTOR, functools.partial(func, *args, **kwargs))
 
 # 한글 / ASCII 가시 / 일반 문장부호 / 한국어 글에서 흔한 기호만 허용.
 # 그 외(한자·가나·라틴 확장·키릴 등) = 외래 문자.
