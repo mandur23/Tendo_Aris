@@ -35,7 +35,13 @@ from GameSystem.TRPGEngine import (
     run_party_turn,
     roll_check,
 )
-from cogs.trpg_ui import CharacterSetupModal, combat_status_lines, hp_bar as _hp_bar
+from cogs.trpg_ui import (
+    CharacterSetupModal,
+    ClassConceptModal,
+    combat_status_lines,
+    hp_bar as _hp_bar,
+    run_class_creation,
+)
 from utils.config import LOCAL_AI_MODEL
 from utils.discord_utils import AuthorLockedView, safe_defer, safe_edit_message
 from utils.file_utils import delete_trpg_party_save, load_trpg_party_saves, set_trpg_party_save
@@ -112,6 +118,10 @@ class PartyLobbyView(discord.ui.View):
             btn.callback = functools.partial(self._class_cb, class_key=class_key)
             self.add_item(btn)
 
+        make_btn = discord.ui.Button(label="✨ 직업 만들기", style=discord.ButtonStyle.success, row=1)
+        make_btn.callback = self._make_cb
+        self.add_item(make_btn)
+
         leave_btn = discord.ui.Button(label="🚪 나가기", style=discord.ButtonStyle.secondary, row=2)
         leave_btn.callback = self._leave_cb
         self.add_item(leave_btn)
@@ -125,17 +135,44 @@ class PartyLobbyView(discord.ui.View):
         self.add_item(cancel_btn)
 
     async def _class_cb(self, interaction: discord.Interaction, class_key: str):
-        user = interaction.user
-        if user.id not in self.lobby.members and len(self.lobby.members) >= PARTY_MAX_MEMBERS:
+        if not self._has_room(interaction.user):
+            await self.cog.respond_ephemeral(interaction, f"파티가 가득 찼어요! (최대 {PARTY_MAX_MEMBERS}명)")
+            return
+        await self._ask_character(interaction, class_key)
+
+    async def _make_cb(self, interaction: discord.Interaction):
+        if not self._has_room(interaction.user):
             await self.cog.respond_ephemeral(interaction, f"파티가 가득 찼어요! (최대 {PARTY_MAX_MEMBERS}명)")
             return
 
+        async def _concept(concept_itx: discord.Interaction, concept: str):
+            await run_class_creation(
+                concept_itx,
+                genre_key=self.lobby.genre_key,
+                concept=concept,
+                model=self.cog._model(),
+                on_accept=self._accept_generated,
+            )
+
+        await interaction.response.send_modal(ClassConceptModal(on_submit_cb=_concept))
+
+    async def _accept_generated(self, interaction: discord.Interaction, class_key: str, spec: dict):
+        """생성된 직업으로 파티에 참가한다."""
+        await self._ask_character(interaction, class_key)
+
+    def _has_room(self, user) -> bool:
+        """이미 참가 중이거나 빈자리가 있으면 True."""
+        return user.id in self.lobby.members or len(self.lobby.members) < PARTY_MAX_MEMBERS
+
+    async def _ask_character(self, interaction: discord.Interaction, class_key: str):
+        """이름·종족·배경을 받아 로비에 참가시킨다 (기존 직업/생성 직업 공통)."""
+        user = interaction.user
         lobby = self.lobby
         prev_name = lobby.profiles.get(user.id, {}).get("name") or user.display_name
 
         async def _submit(modal_itx: discord.Interaction, name: str, race: str, background: str):
             # 모달 입력 중에 다른 사람이 자리를 채웠을 수 있으므로 다시 확인.
-            if user.id not in lobby.members and len(lobby.members) >= PARTY_MAX_MEMBERS:
+            if not self._has_room(user):
                 await self.cog.respond_ephemeral(modal_itx, f"파티가 가득 찼어요! (최대 {PARTY_MAX_MEMBERS}명)")
                 return
             lobby.members[user.id] = class_key
@@ -329,6 +366,9 @@ class TRPGParty(commands.Cog):
         self.lobbies: Dict[PartyKey, PartyLobby] = {}
         self.locks: Dict[PartyKey, asyncio.Lock] = {}
         self.active_views: Dict[PartyKey, PartyAdventureView] = {}
+        # 플레이어가 주사위를 굴리는 동안의 표시용 이름 (key -> 캐릭터명).
+        # 이 시간에는 락을 잡지 않으므로, 안내 문구를 정확히 내기 위해 따로 기록한다.
+        self.pending_rolls: Dict[PartyKey, str] = {}
 
     # ------------------------------------------------------------------ 공통 유틸
     @staticmethod
@@ -351,6 +391,13 @@ class TRPGParty(commands.Cog):
             lock = asyncio.Lock()
             self.locks[key] = lock
         return lock
+
+    def _stale_scene_notice(self, key: PartyKey) -> str:
+        """지나간 장면을 눌렀을 때의 안내. 주사위 대기 중이면 그 사실을 알려준다."""
+        roller = self.pending_rolls.get(key)
+        if roller:
+            return f"**{roller}** 님이 주사위를 굴리는 중이에요. 잠시만요!"
+        return "이미 지나간 장면이에요. 최신 장면에서 행동해주세요!"
 
     async def respond_ephemeral(self, interaction: discord.Interaction, content: str):
         try:
@@ -708,9 +755,10 @@ class TRPGParty(commands.Cog):
             await self.respond_ephemeral(interaction, "GM 아리스가 아직 이야기를 쓰는 중이에요. 잠시만요!")
             return
 
+        # === 1단계: 턴 선점과 판정 준비 (락 안) ===
         async with lock:
             if view.is_finished():
-                await self.respond_ephemeral(interaction, "이미 지나간 장면이에요. 최신 장면에서 행동해주세요!")
+                await self.respond_ephemeral(interaction, self._stale_scene_notice(key))
                 return
             adv = self.parties.get(key)
             if adv is None or not adv.is_playing:
@@ -766,10 +814,28 @@ class TRPGParty(commands.Cog):
             except discord.HTTPException:
                 logger.debug("행동 로그 전송 실패 (무시됨)")
 
-            if manual_roll:
+        # === 사람이 주사위를 굴리는 동안에는 락을 놓는다 ===
+        # 턴은 위에서 view.stop() 으로 이미 선점했으므로 다른 멤버의 행동이 끼어들지 않고,
+        # 그동안 !파티모험계속·중단·종료 같은 다른 조작이 막히지 않는다.
+        if manual_roll:
+            self.pending_rolls[key] = actor.name
+            try:
                 check = await player_roll_check(
                     channel, actor, stat, dc, author_id=interaction.user.id
                 )
+            finally:
+                self.pending_rolls.pop(key, None)
+
+        # === 2단계: 턴 처리 (락 재획득) ===
+        async with lock:
+            # 주사위를 굴리는 사이에 모험이 종료·중단됐을 수 있으므로 다시 확인한다.
+            adv = self.parties.get(key)
+            if adv is None or not adv.is_playing:
+                try:
+                    await channel.send("모험이 끝나 이번 행동은 반영되지 않았어요.")
+                except discord.HTTPException:
+                    logger.debug("행동 무효 안내 전송 실패 (무시됨)")
+                return
 
             try:
                 async with channel.typing():

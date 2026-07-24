@@ -6,6 +6,7 @@
 
 모든 LLM 호출 함수는 동기(blocking)이며, 호출부에서 asyncio.to_thread 로 감싸야 한다.
 """
+import itertools
 import logging
 import copy
 import random
@@ -214,7 +215,9 @@ def _build_class_registry() -> Dict[str, Dict]:
 
 
 # 전체 직업 레지스트리 (key -> 스펙). 세이브/캐릭터 생성은 이 키를 그대로 쓴다.
+# LLM으로 즉석 생성한 직업도 이 레지스트리에 등록된다 (키 접두사: custom_).
 CLASSES: Dict[str, Dict] = _build_class_registry()
+CUSTOM_CLASS_KEY_PREFIX = "custom_"
 
 
 def roll_class_options(genre_key: str, rng: Optional[random.Random] = None) -> List[Tuple[str, Dict]]:
@@ -235,6 +238,136 @@ def roll_class_options(genre_key: str, rng: Optional[random.Random] = None) -> L
         chosen = picker.choice(entries)
         options.append((chosen["key"], CLASSES[chosen["key"]]))
     return options
+
+
+# ------------------------------------------------------------------ 직업 즉석 생성 (LLM)
+# 능력치·HP 는 LLM 이 정하지 않고 원형에서 그대로 가져온다.
+# LLM 은 이름·이모지·소지품만 쓰므로, 어떤 직업이 나와도 기존 직업과 밸런스가 같다.
+ARCHETYPE_HINTS: Dict[str, str] = {
+    "brawn": "완력과 근접 전투로 밀어붙이는 유형",
+    "swift": "민첩함·잠입·정밀한 손놀림으로 해결하는 유형",
+    "mind": "지식·기술·탐구로 문제를 푸는 유형",
+    "charm": "대화·설득·교섭으로 상황을 움직이는 유형",
+}
+ARCHETYPE_FALLBACK_EMOJI: Dict[str, str] = {
+    "brawn": "🛡️", "swift": "🗡️", "mind": "🔮", "charm": "🎭",
+}
+
+CLASS_WRITER_SYSTEM = (
+    "당신은 TRPG 게임 마스터의 직업 설계 보조입니다. 주어진 세계관에 어울리는 직업 하나를 만드세요.\n"
+    "- archetype 은 다음 넷 중 하나입니다: "
+    "brawn(완력·근접전), swift(민첩·잠입·정밀), mind(지식·기술·탐구), charm(대화·설득·교섭)\n"
+    "- label 은 한국어 직업 이름이며 12자 이내입니다.\n"
+    "- emoji 는 직업을 상징하는 이모지 1개입니다.\n"
+    "- items 는 시작 소지품 3개이고, 각각 한국어 12자 이내입니다.\n"
+    '- 다음 JSON 객체 하나만 출력합니다: '
+    '{"label": "이름", "emoji": "🗡️", "archetype": "brawn", "items": ["소지품1", "소지품2", "소지품3"]}'
+)
+CLASS_WRITER_NUM_PREDICT = 200
+CLASS_LABEL_MAX = 12
+CLASS_ITEM_MAX = 12
+
+_custom_class_counter = itertools.count(1)
+
+
+def _clean_class_text(value, limit: int) -> str:
+    """LLM이 준 직업 문자열을 다듬는다. 문자열이 아니면 빈 문자열.
+
+    장면 서술용 _clean_text 와 달리 이모지를 지우지 않는다(직업 이모지가 필요하므로).
+    """
+    if not isinstance(value, str):
+        return ""
+    return value.strip().replace("\n", " ")[:limit]
+
+
+def _normalize_class_items(raw, fallback: List[str]) -> List[str]:
+    """소지품을 정확히 3개로 맞춘다. 부족하면 같은 장르 기본 소지품으로 채운다."""
+    items = [_clean_class_text(x, CLASS_ITEM_MAX) for x in raw] if isinstance(raw, list) else []
+    items = [x for x in items if x][:3]
+    for candidate in fallback:
+        if len(items) >= 3:
+            break
+        if candidate not in items:
+            items.append(candidate)
+    return items[:3]
+
+
+def generate_class(
+    genre_key: str,
+    *,
+    concept: str = "",
+    archetype: Optional[str] = None,
+    model: Optional[str] = None,
+) -> Tuple[str, Dict]:
+    """LLM으로 새 직업을 만들어 레지스트리에 등록하고 (직업 키, 스펙)을 돌려준다.
+
+    concept 이 있으면 그 컨셉을 반영하고, 없으면 세계관에 맞춰 자유롭게 만든다.
+    실패하거나 응답이 형식에 어긋나면 해당 장르의 기존 직업 하나로 대체한다.
+    (LLM 호출이 있으므로 asyncio.to_thread / run_llm 으로 감싸서 사용할 것)
+    """
+    genre = GENRES.get(genre_key) or GENRES["fantasy"]
+    pool_genre = genre_key if genre_key in GENRE_CLASSES else "fantasy"
+
+    def _fallback() -> Tuple[str, Dict]:
+        arch = archetype if archetype in ARCHETYPES else random.choice(ARCHETYPE_ORDER)
+        entry = random.choice(GENRE_CLASSES[pool_genre][arch])
+        return entry["key"], CLASSES[entry["key"]]
+
+    concept_line = f"\n[플레이어가 원하는 컨셉]\n{concept.strip()}" if concept.strip() else ""
+    archetype_line = (
+        f"\n[지정된 archetype]\n{archetype} ({ARCHETYPE_HINTS.get(archetype, '')})"
+        if archetype in ARCHETYPES else ""
+    )
+    user_content = (
+        f"[세계관]\n{genre['label']} — {genre['hint']}"
+        f"{concept_line}{archetype_line}\n\n"
+        "이 세계관에 어울리는 직업 하나를 지시한 JSON 형식으로만 만들어 주세요."
+    )
+
+    try:
+        reply = ollama_chat_sync(
+            [{"role": "user", "content": user_content}],
+            system=CLASS_WRITER_SYSTEM,
+            model=model,
+            temperature=0.9,          # 매번 다른 직업이 나오도록 다양성을 준다
+            format_json=True,
+            num_predict=CLASS_WRITER_NUM_PREDICT,
+        )
+        data = extract_json_object(reply)
+    except Exception as e:
+        logger.warning(f"직업 생성 실패, 기존 직업으로 대체합니다: {e}")
+        return _fallback()
+
+    label = _clean_class_text(data.get("label"), CLASS_LABEL_MAX)
+    if not label:
+        logger.debug("생성된 직업 이름이 비어 있어 기존 직업으로 대체합니다.")
+        return _fallback()
+
+    # 원형은 (1) 호출자가 지정한 값 (2) LLM 응답 (3) 무작위 순으로 정한다.
+    arch = archetype if archetype in ARCHETYPES else None
+    if arch is None:
+        raw_arch = data.get("archetype")
+        arch = raw_arch if raw_arch in ARCHETYPES else random.choice(ARCHETYPE_ORDER)
+
+    emoji = _clean_class_text(data.get("emoji"), 4) or ARCHETYPE_FALLBACK_EMOJI[arch]
+    default_items = GENRE_CLASSES[pool_genre][arch][0]["items"]
+    items = _normalize_class_items(data.get("items"), default_items)
+
+    base = ARCHETYPES[arch]
+    key = f"{CUSTOM_CLASS_KEY_PREFIX}{next(_custom_class_counter)}"
+    spec = {
+        "label": label,
+        "emoji": emoji,
+        "stats": dict(base["stats"]),
+        "hp": base["hp"],
+        "items": items,
+        "archetype": arch,
+        "genre": genre_key,
+        "custom": True,
+    }
+    CLASSES[key] = spec
+    logger.info(f"새 직업 생성: {label} ({arch}, {genre_key})")
+    return key, spec
 
 # LLM 응답이 깨졌을 때 게임이 멈추지 않도록 쓰는 기본 선택지.
 FALLBACK_CHOICES: List[Dict] = [

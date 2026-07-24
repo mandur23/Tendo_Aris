@@ -30,7 +30,13 @@ from GameSystem.TRPGEngine import (
     roll_check,
     roll_dice,
 )
-from cogs.trpg_ui import CharacterSetupModal, combat_status_lines, hp_bar as _hp_bar
+from cogs.trpg_ui import (
+    CharacterSetupModal,
+    ClassConceptModal,
+    combat_status_lines,
+    hp_bar as _hp_bar,
+    run_class_creation,
+)
 from utils.config import LOCAL_AI_MODEL
 from utils.discord_utils import AuthorLockedView, safe_defer, safe_edit_message
 from utils.file_utils import delete_trpg_save, load_trpg_saves, set_trpg_save
@@ -84,7 +90,34 @@ class ClassSelectView(AuthorLockedView):
             btn.callback = functools.partial(self._class_cb, class_key=class_key)
             self.add_item(btn)
 
+        make_btn = discord.ui.Button(label="✨ 직업 만들기", style=discord.ButtonStyle.success, row=1)
+        make_btn.callback = self._make_cb
+        self.add_item(make_btn)
+
     async def _class_cb(self, interaction: discord.Interaction, class_key: str):
+        async def _submit(modal_itx: discord.Interaction, name: str, race: str, background: str):
+            self.stop()
+            character = TRPGCharacter.create(name, class_key, race=race, background=background)
+            await self.cog.start_adventure(modal_itx, self.key, self.genre_key, character)
+
+        await interaction.response.send_modal(
+            CharacterSetupModal(default_name=interaction.user.display_name, on_submit_cb=_submit)
+        )
+
+    async def _make_cb(self, interaction: discord.Interaction):
+        async def _concept(concept_itx: discord.Interaction, concept: str):
+            await run_class_creation(
+                concept_itx,
+                genre_key=self.genre_key,
+                concept=concept,
+                model=self.cog._model(),
+                on_accept=self._accept_generated,
+            )
+
+        await interaction.response.send_modal(ClassConceptModal(on_submit_cb=_concept))
+
+    async def _accept_generated(self, interaction: discord.Interaction, class_key: str, spec: dict):
+        """생성된 직업으로 캐릭터를 만들어 모험을 시작한다."""
         async def _submit(modal_itx: discord.Interaction, name: str, race: str, background: str):
             self.stop()
             character = TRPGCharacter.create(name, class_key, race=race, background=background)
@@ -200,6 +233,9 @@ class TRPG(commands.Cog):
         self.adventures: Dict[SessionKey, TRPGAdventure] = {}
         self.locks: Dict[SessionKey, asyncio.Lock] = {}
         self.active_views: Dict[SessionKey, AdventureView] = {}
+        # 플레이어가 주사위를 굴리는 동안의 표시용 이름 (key -> 캐릭터명).
+        # 이 시간에는 락을 잡지 않으므로, 안내 문구를 정확히 내기 위해 따로 기록한다.
+        self.pending_rolls: Dict[SessionKey, str] = {}
 
     # ------------------------------------------------------------------ 공통 유틸
     @staticmethod
@@ -222,6 +258,13 @@ class TRPG(commands.Cog):
             lock = asyncio.Lock()
             self.locks[key] = lock
         return lock
+
+    def _stale_scene_notice(self, key: SessionKey) -> str:
+        """지나간 장면을 눌렀을 때의 안내. 주사위 대기 중이면 그 사실을 알려준다."""
+        roller = self.pending_rolls.get(key)
+        if roller:
+            return f"**{roller}** 님이 주사위를 굴리는 중이에요. 잠시만요!"
+        return "이미 지나간 장면이에요. 최신 장면에서 행동해주세요!"
 
     async def respond_ephemeral(self, interaction: discord.Interaction, content: str):
         try:
@@ -487,10 +530,11 @@ class TRPG(commands.Cog):
             await self.respond_ephemeral(interaction, "GM 아리스가 아직 이야기를 쓰는 중이에요. 잠시만요!")
             return
 
+        # === 1단계: 턴 선점과 판정 준비 (락 안) ===
         async with lock:
             # 더블 클릭 대비: 락 대기 중에 같은 뷰의 다른 클릭이 먼저 처리됐다면 중단.
             if view.is_finished():
-                await self.respond_ephemeral(interaction, "이미 지나간 장면이에요. 최신 장면에서 행동해주세요!")
+                await self.respond_ephemeral(interaction, self._stale_scene_notice(key))
                 return
             # 락 대기 중에 !모험종료 등으로 모험이 사라졌을 수 있으므로 다시 확인.
             adv = self.adventures.get(key)
@@ -537,10 +581,30 @@ class TRPG(commands.Cog):
             except discord.HTTPException:
                 logger.debug("행동 로그 전송 실패 (무시됨)")
 
-            if manual_roll:
+            character = adv.character
+
+        # === 사람이 주사위를 굴리는 동안에는 락을 놓는다 ===
+        # 턴은 위에서 view.stop() 으로 이미 선점했으므로 다른 행동이 끼어들지 않고,
+        # 그동안 !모험계속·중단·종료 같은 다른 조작이 막히지 않는다.
+        if manual_roll:
+            self.pending_rolls[key] = character.name
+            try:
                 check = await player_roll_check(
-                    channel, adv.character, stat, dc, author_id=interaction.user.id
+                    channel, character, stat, dc, author_id=interaction.user.id
                 )
+            finally:
+                self.pending_rolls.pop(key, None)
+
+        # === 2단계: 턴 처리 (락 재획득) ===
+        async with lock:
+            # 주사위를 굴리는 사이에 모험이 종료·중단됐을 수 있으므로 다시 확인한다.
+            adv = self.adventures.get(key)
+            if adv is None or not adv.is_playing:
+                try:
+                    await channel.send("모험이 끝나 이번 행동은 반영되지 않았어요.")
+                except discord.HTTPException:
+                    logger.debug("행동 무효 안내 전송 실패 (무시됨)")
+                return
 
             try:
                 async with channel.typing():
@@ -585,6 +649,10 @@ class TRPG(commands.Cog):
         # 턴 처리 도중 중단하면 저장 시점이 꼬일 수 있으므로 막는다.
         if self._lock(key).locked():
             await self.respond_ephemeral(interaction, "GM 아리스가 이야기를 쓰는 중에는 중단할 수 없어요. 잠시만요!")
+            return
+        # 주사위 대기 중에는 락이 풀려 있으므로 별도로 막는다.
+        if key in self.pending_rolls:
+            await self.respond_ephemeral(interaction, "주사위 판정 중에는 중단할 수 없어요. 잠시만요!")
             return
 
         adv = self.adventures.get(key)
