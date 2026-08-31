@@ -1151,17 +1151,18 @@ class Music(commands.Cog):
             "플레이리스트": ["플레이리스트", "플레이리스트추가", "플레이리스트재생", "플레이리스트삭제", "플레이리스트노래삭제"],
             "히스토리": ["히스토리", "다시재생", "히스토리삭제", "날짜별재생", "이번주재생", "큐로그"],
             "TTS": ["tts", "tts목소리", "tts느리게", "tts설정"],
-            "AI": ["대화", "대화tts", "ai설정"],
+            "AI": ["대화", "대화tts", "대화종료", "ai설정", "지식"],
+            "주식": ["주가"],
             "관리": ["삭제", "재시작", "종료봇"]
         }
         
-        # 게임/TRPG 명령어 확인
+        # 게임/TRPG 명령어 확인 (1인용 TRPG + 파티 TRPG + 자유 모험 모두 포함)
         game_commands = []
         trpg_commands = []
         for cmd in self.bot.commands:
             if cmd.cog and cmd.cog.__class__.__name__ in ("YachtDiceGame", "BlackjackGame"):
                 game_commands.append(cmd.name)
-            elif cmd.cog and cmd.cog.__class__.__name__ == "TRPG":
+            elif cmd.cog and cmd.cog.__class__.__name__ in ("TRPG", "TRPGParty", "TRPGWorld"):
                 trpg_commands.append(cmd.name)
         if game_commands:
             categories["게임"] = game_commands
