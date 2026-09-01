@@ -388,7 +388,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
       <!-- LOGS -->
       <section id="logs" class="sec">
-        <div class="sec-h"><span class="k">▸ 실시간 로그</span><button class="cc-btn sm" onclick="loadLogs()">갱신</button><span class="ln"></span></div>
+        <div class="sec-h"><span class="k">▸ 실시간 로그</span><span style="display:inline-flex;align-items:center;gap:5px;font:500 10px var(--mono);color:#4ad9a8"><span style="width:6px;height:6px;border-radius:50%;background:#4ad9a8;box-shadow:0 0 6px #4ad9a8;animation:blink 2s infinite"></span>5초 자동</span><button class="cc-btn sm" onclick="loadLogs()">즉시 갱신</button><span class="ln"></span></div>
         <pre id="log-box" style="background:rgba(6,8,16,.85);border:1px solid rgba(145,132,217,.14);border-radius:14px;padding:16px 18px;font:400 12px/1.65 var(--mono);color:#9fd8c8;max-height:320px;overflow:auto;white-space:pre-wrap;word-break:break-all">불러오는 중...</pre>
       </section>
 
@@ -550,7 +550,16 @@ async function loadModels(){const sel=document.getElementById('model-select');tr
 async function applyModel(){const model=document.getElementById('model-select').value;if(!model)return;const persist=document.getElementById('model-persist').checked;const r=await api('/api/chat/model',{method:'POST',body:JSON.stringify({model,persist})});if(!r)return;const d=await r.json();if(r.ok&&!d.error){toast('모델을 '+model+'(으)로 전환했습니다'+(d.persisted?' (TOKEN.env 저장됨)':''));refreshAll();}else{toast(d.error||'모델 전환 실패');}}
 async function endSession(s){if(!confirm(s.user+' ('+s.channel+') 대화 세션을 종료할까요?'))return;const r=await api('/api/chat/session/end',{method:'POST',body:JSON.stringify({guild_id:s.guild_id,channel_id:s.channel_id,user_id:s.user_id})});if(!r)return;const d=await r.json();toast(d.ended?'세션을 종료했습니다':(d.error||'세션이 이미 없습니다'));refreshAll();}
 async function musicAction(action,guildId){if(action==='stop'&&!confirm('재생을 정지하고 대기열을 비울까요?'))return;const r=await api('/api/music/'+action,{method:'POST',body:JSON.stringify({guild_id:guildId})});if(!r)return;const d=await r.json();toast(r.ok?(action==='skip'?'스킵했습니다':'정지했습니다'):(d.error||'실패했습니다'));refreshAll();}
-async function loadLogs(){try{const r=await api('/api/logs?lines=200');if(!r)return;document.getElementById('log-box').textContent=await r.text()||'(로그 없음)';}catch(e){document.getElementById('log-box').textContent='로그를 불러오지 못했습니다';}}
+async function loadLogs(){
+  const box=document.getElementById('log-box');
+  // 사용자가 위로 스크롤해 읽는 중이면 자동 스크롤로 방해하지 않는다 (맨 아래 근처일 때만 따라간다).
+  const atBottom=box.scrollHeight-box.scrollTop-box.clientHeight<40;
+  try{
+    const r=await api('/api/logs?lines=200');if(!r)return;
+    const text=await r.text();
+    if(box.textContent!==text){box.textContent=text||'(로그 없음)';if(atBottom)box.scrollTop=box.scrollHeight;}
+  }catch(e){box.textContent='로그를 불러오지 못했습니다';}
+}
 async function shutdownBot(){const a=prompt('봇을 정말 종료하려면 "종료" 라고 입력하세요.');if(a!=='종료')return;const r=await api('/api/shutdown',{method:'POST'});if(r&&r.ok)toast('종료 신호를 보냈습니다. 잠시 후 봇이 꺼집니다.');}
 async function logout(){await fetch('/logout',{method:'POST'});location.href='/login';}
 
@@ -594,7 +603,9 @@ function lookupStock(){if(_stockTimer){clearTimeout(_stockTimer);_stockTimer=nul
 (function(){const scroller=document.getElementById('scroller');const links=[...document.querySelectorAll('#side-nav .cc-nav')];const secs=links.map(a=>document.getElementById(a.getAttribute('data-sec'))).filter(Boolean);
 scroller.addEventListener('scroll',()=>{const top=scroller.scrollTop+90;let cur=secs[0];for(const s of secs){if(s.offsetTop<=top)cur=s;}links.forEach(a=>a.classList.toggle('on',a.getAttribute('data-sec')===cur.id));});})();
 
-refreshAll();loadModels();loadLogs();setInterval(refreshAll,5000);
+refreshAll();loadModels();loadLogs();
+setInterval(refreshAll,5000);
+setInterval(loadLogs,5000);   // 실시간 로그: 5초마다 자동 갱신
 </script>
 </body>
 </html>

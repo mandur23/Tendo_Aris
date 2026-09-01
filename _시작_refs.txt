@@ -1,0 +1,10 @@
+_s5.py:3:# Find references to !시작 in yacht and elsewhere
+_s5.py:9:if '!시작' in line or "name='시작'" in line or 'name="시작"' in line:
+cogs\trpg.py:845:self.trpg_group.command(name="시작", description="AI가 생성하는 TRPG 모험을 시작합니다")(self.slash_trpg_start)
+cogs\trpg_party.py:1114:self.party_group.command(name="시작", description="파티 TRPG 로비를 엽니다 (채널당 1개)")(self.slash_party_start)
+cogs\trpg_world.py:1115:self.world_group.command(name="시작", description="새 공유 세계를 엽니다 (채널당 1개)")(self.slash_world_start)
+GameSystem\BlackjackGame.py:556:self.blackjack_group.command(name="시작", description="대기 중인 블랙잭 게임을 시작합니다")(self.slash_start)
+GameSystem\YachtDiceGame.py:472:description=f"**{player.display_name}**님이 야추 게임을 시작했습니다!\n\n다른 플레이어들은 `!야추`를 입력해서 참가하세요.\n게임장은 `!시작`을 입력해서 게임을 시작할 수 있습니
+GameSystem\YachtDiceGame.py:499:description=f"**{player.display_name}**님이 게임에 참가했습니다!\n\n게임장(시작 권한)은 `!시작`을 입력하세요.",
+GameSystem\YachtDiceGame.py:511:@commands.command(name='시작', help='대기 중인 야추 게임을 시작합니다.')
+GameSystem\YachtDiceGame.py:820:self.yacht_group.command(name="시작", description="대기 중인 야추 게임을 시작합니다")(self.slash_start)

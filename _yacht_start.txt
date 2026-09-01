@@ -1,0 +1,32 @@
+                await ctx.send("이 채널에서 이미 게임이 진행 중입니다.")
+
+    @commands.command(name='시작', help='대기 중인 야추 게임을 시작합니다.')
+    async def start_yacht_game(self, ctx):
+        channel_id = ctx.channel.id
+        lock = self.locks.get(channel_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self.locks[channel_id] = lock
+
+        async with lock:
+            game = self.games.get(channel_id)
+            if not game:
+                await ctx.send("진행 중인 게임이 없습니다. `!야추`로 새 게임을 만들어주세요.")
+                return
+
+            if game['state'] != 'waiting':
+                await ctx.send("이미 게임이 진행 중입니다.")
+                return
+
+            if ctx.author.id != game['players'][0]:
+                await ctx.send("게임을 시작할 권한이 없습니다. 게임장만 시작할 수 있습니다.")
+                return
+
+            if len(game['players']) < 2:
+                await ctx.send("최소 2명 이상의 플레이어가 필요합니다.")
+                return
+
+            for p_id in game['players']:
+                game['scores'][p_id] = {
+                    'ones': None, 'twos': None, 'threes': None, 'fours': None, 'fives': None, 'sixes': None,
+                    'full_house': None, 'four_of_a_kind': None, 'little_

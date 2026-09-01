@@ -1,0 +1,58 @@
+cogs\chat_ai.py: name="대화", aliases=["ai", "챗", "질문"]
+cogs\chat_ai.py: name="대화tts", aliases=["aitts", "챗tts"]
+cogs\chat_ai.py: name="대화종료", aliases=["ai종료", "챗종료"]
+cogs\chat_ai.py: name="ai설정", aliases=["aisettings"]
+cogs\chat_ai.py: name="지식", aliases=["knowledge", "지식목록"]
+cogs\music.py: name='play', aliases=['p', '재생', '플레이']
+cogs\music.py: aliases=['종료']
+cogs\music.py: aliases=['나가!']
+cogs\music.py: aliases=['볼륨']
+cogs\music.py: aliases=['큐', '대기열']
+cogs\music.py: name='지금', aliases=['nowplaying', 'np', '현재곡']
+cogs\music.py: aliases=['플레이리스트목록', '플래이리스트', 'vmffpdlfltmxm']
+cogs\music.py: name='플레이리스트추가', aliases=['프래이리스트추가', 'vmffpdlfltmxmcnrk']
+cogs\music.py: name='플레이리스트재생', aliases=['플래이리스트재생', 'vmffpdlfltmxmwotod']
+cogs\music.py: name='플레이리스트삭제', aliases=['플래이리스트삭제', 'playrestdelete']
+cogs\music.py: name='플레이리스트노래삭제', aliases=['프래이리스트노래삭제']
+cogs\music.py: name='히스토리', aliases=['history', '기록', 'record']
+cogs\music.py: name='다시재생', aliases=['replay', '재재생', 'playagain']
+cogs\music.py: name='히스토리삭제', aliases=['clearhistory', '기록삭제']
+cogs\music.py: name='큐로그', aliases=['queuelog', '대기열로그']
+cogs\music.py: name='날짜별재생', aliases=['dateplay', '날짜재생', 'playbydate']
+cogs\music.py: name='이번주재생', aliases=['weekplay', '주간재생']
+cogs\music.py: 
+cogs\music.py: name='도움말', aliases=['도움', 'help']
+cogs\music.py: name='재시작', aliases=['restart']
+cogs\music.py: name='종료봇', aliases=['exit']
+cogs\stock.py: name="주가", aliases=["stock", "시세"]
+cogs\trpg.py: name="모험", aliases=["trpg", "모험시작"], help="AI 생성형 TRPG 모험을 시작합니다."
+cogs\trpg.py: name="모험계속", aliases=["trpg계속", "모험재개"], help="저장된 TRPG 모험을 이어서 진행합니다."
+cogs\trpg.py: name="모험상태", aliases=["trpg상태"], help="진행 중인 TRPG 캐릭터 상태를 확인합니다."
+cogs\trpg.py: name="주사위", aliases=["roll", "굴림"], help="TRPG 주사위를 굴립니다. 예: !주사위 2d6+3 (기본 d20
+cogs\trpg.py: name="모험종료", aliases=["trpg종료"], help="진행 중인 TRPG 모험을 종료하고 세이브를 삭제합니다."
+cogs\trpg_party.py: name="파티모험", aliases=["멀티모험", "파티trpg"], help="여럿이 함께하는 파티 TRPG 모험을 시작합니다."
+cogs\trpg_party.py: name="파티모험계속", aliases=["파티계속"], help="저장된 파티 TRPG 모험을 이어서 진행합니다."
+cogs\trpg_party.py: name="파티모험상태", aliases=["파티상태"], help="진행 중인 파티 TRPG 상태를 확인합니다."
+cogs\trpg_party.py: name="파티모험종료", aliases=["파티종료"], help="진행 중인 파티 TRPG 모험을 종료하고 세이브를 삭제합니다."
+cogs\trpg_world.py: name="자유모험", aliases=["월드모험", "자유trpg"], help="여럿이 드나드는 자유 모험(공유 세계
+cogs\trpg_world.py: name="자유모험참가", aliases=["월드참가", "자유참가"], help="이 채널의 자유 모험 세계에 합류합니다."
+cogs\trpg_world.py: name="자유모험계속", aliases=["월드계속", "자유계속"], help="저장된 자유 모험 세계를 이어서 진행합니다."
+cogs\trpg_world.py: name="자유모험상태", aliases=["월드상태", "자유상태"], help="자유 모험 세계의 모험가 시트를 확인합니다."
+cogs\trpg_world.py: name="자유모험이탈", aliases=["월드이탈", "자유이탈"], help="자유 모험 세계에서 내 캐릭터를 이탈시킵니다."
+cogs\trpg_world.py: name="자유모험종료", aliases=["월드종료", "자유종료"], help="자유 모험 세계를 닫고 세이브를 삭제합니다."
+cogs\tts.py: name='tts', aliases=['말하기', '읽기', '읽어줘']
+cogs\tts.py: name='tts목소리', aliases=['ttsvoice', 'tts모델', '목소리변경']
+cogs\tts.py: name='tts느리게', aliases=['ttsslow']
+cogs\tts.py: name='tts설정', aliases=['ttssettings']
+cogs\tts.py: name='ttsrvc모델추가', aliases=['ttsrvcadd', 'rvc모델추가']
+cogs\tts.py: name='ttsrvc모델삭제', aliases=['ttsrvcremove', 'rvc모델삭제']
+cogs\tts.py: name='ttsrvc모델목록', aliases=['ttsrvclist', 'rvc모델목록']
+cogs\tts.py: name='ttsrvc사용', aliases=['ttsrvcuse', 'rvc사용']
+cogs\tts.py: name='ttsrvc끄기', aliases=['ttsrvcdisable', 'rvc끄기']
+cogs\tts.py: name='ttsrvc자동등록', aliases=['ttsrvcscan', 'rvc자동등록']
+GameSystem\BlackjackGame.py: name='블랙잭', help='블랙잭 게임을 시작하거나 참가합니다.'
+GameSystem\BlackjackGame.py: name='블랙잭시작', help='대기 중인 블랙잭 게임을 시작합니다.'
+GameSystem\BlackjackGame.py: name='블랙잭취소', help='진행 중인 블랙잭 게임을 취소합니다.'
+GameSystem\YachtDiceGame.py: name='야추', help='야추 다이스 게임을 시작합니다.'
+GameSystem\YachtDiceGame.py: name='시작', help='대기 중인 야추 게임을 시작합니다.'
+GameSystem\YachtDiceGame.py: name='야추취소', help='진행 중인 야추 게임을 취소합니다.'

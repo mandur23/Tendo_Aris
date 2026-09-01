@@ -1,0 +1,114 @@
+
+        """모든 사용 가능한 명령어와 설명을 보여줍니다."""
+        # 명령어를 카테고리별로 분류
+        categories = {
+            "음악": ["play", "stop", "leave", "volume", "queue", "지금"],
+            "플레이리스트": ["플레이리스트", "플레이리스트추가", "플레이리스트재생", "플레이리스트삭제", "플레이리스트노래삭제"],
+            "히스토리": ["히스토리", "다시재생", "히스토리삭제", "날짜별재생", "이번주재생", "큐로그"],
+            "TTS": ["tts", "tts목소리", "tts느리게", "tts설정"],
+            "AI": ["대화", "대화tts", "대화종료", "ai설정", "지식"],
+            "주식": ["주가"],
+            "관리": ["삭제", "재시작", "종료봇"]
+        }
+        
+        # 게임/TRPG 명령어 확인 (1인용 TRPG + 파티 TRPG + 자유 모험 모두 포함)
+        game_commands = []
+        trpg_commands = []
+        for cmd in self.bot.commands:
+            if cmd.cog and cmd.cog.__class__.__name__ in ("YachtDiceGame", "BlackjackGame"):
+                game_commands.append(cmd.name)
+            elif cmd.cog and cmd.cog.__class__.__name__ in ("TRPG", "TRPGParty", "TRPGWorld"):
+                trpg_commands.append(cmd.name)
+        if game_commands:
+            categories["게임"] = game_commands
+        if trpg_commands:
+            categories["TRPG"] = sorted(trpg_commands)
+        
+        # 현재 페이지 (기본: 음악)
+        current_page = "음악"
+        
+        def create_embed(page: str):
+            """페이지별 Embed 생성"""
+            embed = discord.Embed(
+                title=f"아리스의 명령어 목록 - {page}",
+                description="카테고리별로 명령어를 확인할 수 있어요!",
+                color=0x3498db
+            )
+            
+            if page in categories:
+                commands_list = categories[page]
+                for cmd_name in commands_list:
+                    cmd = self.bot.get_command(cmd_name)
+                    if cmd and not cmd.hidden:
+                        aliases = f" ({', '.join(['!' + a for a in cmd.aliases[:2]])})" if cmd.aliases else ""
+                        embed.add_field(
+                            name=f"!{cmd.name}{aliases}",
+                            value=cmd.help or "설명이 없어요.",
+                            inline=False
+                        )
+            else:
+                embed.description = "이 카테고리에는 명령어가 없어요."
+            
+            embed.set_footer(text=f"페이지 {list(categories.keys()).index(page) + 1}/{len(categories)}")
+            return embed
+        
+        # View 생성
+        class HelpView(discord.ui.View):
+            def __init__(self, author_id: int, categories: dict, create_embed_func):
+                super().__init__(timeout=120)
+                self.author_id = author_id
+                self.categories = categories
+                self.create_embed = create_embed_func
+                self.current_page = "음악"
+                self.message = None
+                
+                # 카테고리 버튼 추가 (Discord 제한: 5줄 x 5개 = 최대 25개)
+                for i, cat in enumerate(categories.keys()):
+                    if i < 25:
+                        btn = discord.ui.Button(
+                            label=cat,
+                            style=discord.ButtonStyle.primary if cat == self.current_page else discord.ButtonStyle.secondary,
+                            row=i // 5
+                        )
+                        btn.callback = self.create_callback(cat)
+                        self.add_item(btn)
+            
+            def create_callback(self, category: str):
+                async def callback(interaction: discord.Interaction):
+                    if interaction.user.id != self.author_id:
+                        await interaction.response.send_message(
+                            "선생님, 다른 사람의 도움말을 조작할 수 없어요!",
+                            ephemeral=True,
+                            delete_after=5
+                        )
+                        return
+                    
+                    self.current_page = category
+                    new_embed = self.create_embed(category)
+                    
+                    # 버튼 스타일 업데이트
+                    for item in self.children:
+                        if isinstance(item, discord.ui.Button):
+                            if item.label == category:
+                                item.style = discord.ButtonStyle.primary
+                            else:
+                                item.style = discord.ButtonStyle.secondary
+                    
+                    await interaction.response.edit_message(embed=new_embed, view=self)
+                
+                return callback
+            
+            async def on_timeout(self):
+                for item in self.children:
+                    item.disabled = True
+                try:
+                    if self.message:
+                        await self.message.edit(view=self)
+                except Exception:
+                    pass
+        
+        view = HelpView(ctx.author.id, categories, create_embed)
+        embed = create_embed(current_page)
+        message = await ctx.send(embed=embed, view=view)
+        view.message = message
+        await delete_command_message(ctx)

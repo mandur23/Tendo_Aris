@@ -1,0 +1,25 @@
+게요!", delete_after=10)
+        else:
+            await ctx.send(f"선생님, 이번 주에 들었던 {added_count}곡을 대기열에 추가했어요!", delete_after=10)
+        
+        await delete_command_message(ctx)
+
+    # ========== 관리자/기타 명령어 ==========
+
+    @commands.command()
+    @commands.has_permissions(manage_messages=True)
+    async def 삭제(self, ctx, amount: int = 2):
+        """지정된 수의 메시지를 삭제합니다."""
+        if amount < 1:
+            return await ctx.send("어라? 1개 이상의 메시지를 지정해 주셔야 해요. 아리스가 삭제할 수 있게요!", delete_after=12)
+
+        deleted = await ctx.channel.purge(limit=amount + 1)
+        await ctx.send(f"선생님, {len(deleted) - 1}개의 메시지를 깨끗하게 지웠어요! 아리스가 열심히 청소했답니다~", delete_after=5)
+        await delete_command_message(ctx)
+
+    @삭제.error
+    async def 삭제_error(self, ctx, error):
+        if isinstance(error, commands.MissingPermissions):
+            await ctx.send("앗, 죄송해요 선생님. 이 명령어는 특별한 권한이 필요해요. 아리스가 도와드리고 싶어도 못 해드려요...", delete_after=12)
+        elif isinstance(error, commands.BadArgument):
+            await ctx.s

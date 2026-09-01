@@ -1,0 +1,48 @@
+def resume_after_tts(self):
+        """TTS 재생 후 음악을 일시정지된 위치부터 다시 재생합니다."""
+        if not self.current:
+            logger.warning("재생할 음악 정보가 없습니다.")
+            return False
+        
+        if not self.guild.voice_client:
+            logger.warning("voice_client가 없습니다.")
+            return False
+        
+        try:
+            # 현재 재생 중인 것이 있으면 중지
+            if self.guild.voice_client.is_playing():
+                self.guild.voice_client.stop()
+            
+            # 저장된 current 정보로 음악 재생
+            source = self.current
+            
+            # 일시정지된 위치부터 재생하기 위한 FFmpeg 옵션
+            resume_position = int(self.paused_at_position)
+            if resume_position > 0:
+                # -ss 옵션으로 특정 시간부터 재생
+                before_opts = f"{ffmpeg_options['before_options']} -ss {resume_position}"
+                logger.debug(f"음악 재생 재개 위치: {resume_position}초부터")
+            else:
+                before_opts = ffmpeg_options['before_options']
+                logger.debug("음악 재생 재개 위치: 처음부터 (첫 TTS 호출)")
+            
+            # 재생 시작 시간 기록 (재개 위치를 고려하여 설정)
+            # 일시정지 시점의 위치를 유지하기 위해 현재 시간에서 일시정지 위치를 뺀 값으로 설정
+            import time
+            current_time = time.time()
+            self.playback_start_time = current_time - resume_position
+            # 일시정지 플래그 해제 (위치 추적 재개)
+            self.paused_at_time = None
+            self.last_position_update = current_time
+            
+            self.guild.voice_client.play(
+                discord.FFmpegPCMAudio(source['url'], executable=ffmpeg_path,
+                                       before_options=before_opts,
+                                       options=ffmpeg_options['options']),
+                after=self._on_playback_after
+            )
+            self.guild.voice_client.source = discord.PCMVolumeTransformer(self.guild.voice_client.source)
+            self.guild.voice_client.source.volume = self.volume
+            self._suspended_for_tts = False
+
+            logger.debug(f"음악 재생 재개: {source

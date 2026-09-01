@@ -119,6 +119,9 @@ class RecordView(discord.ui.View):
                     except discord.HTTPException:
                         logger.exception("공지 전송 실패")
 
+                # 기록 완료 후 View 타임아웃을 멈춰, 이후 가짜 "시간 초과" 알림이 뜨지 않게 한다.
+                self.stop()
+
             b.callback = functools.partial(_cat_cb, category=cat, score=score)
             self.add_item(b)
 
@@ -158,6 +161,9 @@ class RecordView(discord.ui.View):
                         await interaction.followup.send("점수 기록을 취소했습니다.", ephemeral=True)
                 except Exception:
                     logger.exception("취소 후속 응답 실패")
+
+            # 취소 후에도 타임아웃 콜백이 돌지 않도록 View를 즉시 중지한다.
+            self.stop()
 
         cancel_btn.callback = _cancel_cb
         self.add_item(cancel_btn)

@@ -1,0 +1,22 @@
+@commands.command(name='야추취소', help='진행 중인 야추 게임을 취소합니다.')
+    async def cancel_yacht_game(self, ctx):
+        channel_id = ctx.channel.id
+        lock = self.locks.get(channel_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self.locks[channel_id] = lock
+
+        async with lock:
+            game = self.games.get(channel_id)
+            if not game:
+                await ctx.send("진행 중인 게임이 없습니다.")
+                return
+
+            can_manage = getattr(ctx.author, "guild_permissions", None) and ctx.author.guild_permissions.manage_messages
+            if ctx.author.id != game['players'][0] and not can_manage:
+                await ctx.send("게임을 취소할 권한이 없습니다.", delete_after=10)
+                return
+
+            try:
+                del self.games[channel_id]
+  

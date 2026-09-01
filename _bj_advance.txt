@@ -1,0 +1,71 @@
+async def _advance_turn_unlocked(self, channel_id: int):
+        """다음 'playing' 상태 플레이어에게 턴을 넘기고, 없으면 딜러 턴으로 넘어갑니다. (락 보유 상태에서 호출)"""
+        game = self.games.get(channel_id)
+        if not game or game['state'] != 'playing':
+            return
+
+        next_idx = None
+        for i in range(game['current_player'] + 1, len(game['players'])):
+            p_id = game['players'][i]
+            if game['status'].get(p_id) == 'playing':
+                next_idx = i
+                break
+
+        if next_idx is None:
+            await self._dealer_turn_and_finish(channel_id)
+            return
+
+        game['current_player'] = next_idx
+        p_id = game['players'][next_idx]
+
+        channel = self.bot.get_channel(channel_id)
+        if not channel:
+            return
+
+        embed = self._turn_embed(channel_id, p_id, f"<@{p_id}>님의 턴입니다! 히트 또는 스탠드를 선택하세요.")
+        view = BlackjackView(self, channel_id, p_id)
+        try:
+            msg = await channel.send(embed=embed, view=view)
+            game['last_message_id'] = msg.id
+        except discord.HTTPException:
+            logger.exception("블랙잭 턴 메시지 전송 실패")
+
+    async def _dealer_turn_and_finish(self, channel_id: int):
+        game = self.games.get(channel_id)
+        if not game:
+            return
+
+        game['state'] = 'dealer'
+        channel = self.bot.get_channel(channel_id)
+
+        # 딜러는 17 이상이 될 때까지 뽑음
+        while hand_value(game['dealer']) < 17:
+            game['dealer'].append(self._draw(game))
+
+        dealer_value = hand_value(game['dealer'])
+        dealer_bj = is_blackjack(game['dealer'])
+        dealer_bust = dealer_value > 21
+
+        embed = discord.Embed(title="🏁 블랙잭 결과", color=0xf1c40f)
+        dealer_text = f"{hand_str(game['dealer'])} (**{dealer_value}점**)"
+        if dealer_bj:
+            dealer_text += " — 블랙잭!"
+        elif dealer_bust:
+            dealer_text += " — 💥 버스트!"
+        embed.add_field(name="🎩 딜러", value=dealer_text, inline=False)
+
+        lines = []
+        for p_id in game['players']:
+            hand = game['hands'][p_id]
+            value = hand_value(hand)
+            status = game['status'][p_id]
+            name = self._member_name(channel, p_id)
+
+            if status == 'bust':
+                result = "❌ 패배 (버스트)"
+            elif status == 'blackjack':
+                result = "🤝 무승부 (둘 다 블랙잭)" if dealer_bj else "🎊 블랙잭 승리!"
+            elif dealer_bj:
+                result = "❌ 패배 (딜러 블랙잭)"
+            elif dealer_bust or value > dealer_value:
+      
