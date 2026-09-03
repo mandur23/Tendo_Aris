@@ -186,6 +186,7 @@ class YachtGameView(discord.ui.View):
         self.cog = cog
         self.ctx_or_channel = ctx_or_channel
         self.channel_id = channel_id
+        self.message = None
         self.game = cog.games.get(channel_id)
 
         if not self.game:
@@ -233,29 +234,36 @@ class YachtGameView(discord.ui.View):
         self.roll_btn.style = discord.ButtonStyle.green if self.game['rolls_left'] > 0 else discord.ButtonStyle.secondary
         self.roll_btn.disabled = self.game['rolls_left'] <= 0
 
+        has_rolled = self.game.get('has_rolled', False)
         for i, b in enumerate(self.dice_buttons):
             die = self.game['dice'][i]
             is_kept = self.game['kept_dice'][i]
             b.label = f"🔒 {die}" if is_kept else f"🎲 {die}"
             b.style = discord.ButtonStyle.primary if is_kept else discord.ButtonStyle.secondary
-            b.disabled = False
+            b.disabled = not has_rolled
 
         self.scoreboard_btn.disabled = False
         self.record_btn.disabled = False
 
     async def _roll_cb(self, interaction: discord.Interaction):
-        if self.game['rolls_left'] <= 0:
-            await interaction.response.send_message("더 이상 굴릴 수 없어요.", ephemeral=True)
-            return
+        lock = self.cog.locks.get(self.channel_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self.cog.locks[self.channel_id] = lock
 
-        for i in range(5):
-            if not self.game['kept_dice'][i]:
-                self.game['dice'][i] = random.randint(1, 6)
-        self.game['rolls_left'] -= 1
-        self.game['has_rolled'] = True
+        async with lock:
+            if self.game['rolls_left'] <= 0:
+                await interaction.response.send_message("더 이상 굴릴 수 없어요.", ephemeral=True)
+                return
 
-        self.update_buttons()
-        embed = self.create_embed_for_current_player(f"🎲 주사위: {self.dice_display()}", "주사위를 고정하거나 점수를 기록하세요.")
+            for i in range(5):
+                if not self.game['kept_dice'][i]:
+                    self.game['dice'][i] = random.randint(1, 6)
+            self.game['rolls_left'] -= 1
+            self.game['has_rolled'] = True
+
+            self.update_buttons()
+            embed = self.create_embed_for_current_player(f"🎲 주사위: {self.dice_display()}", "주사위를 고정하거나 점수를 기록하세요.")
 
         try:
             await interaction.response.edit_message(embed=embed, view=self)
@@ -270,9 +278,20 @@ class YachtGameView(discord.ui.View):
             logger.exception("roll_cb: HTTP 에러")
 
     async def _dice_cb(self, interaction: discord.Interaction, index: int):
-        self.game['kept_dice'][index] = not self.game['kept_dice'][index]
-        self.update_buttons()
-        embed = self.create_embed_for_current_player(f"🎲 주사위: {self.dice_display()}", "주사위를 고정하거나 점수를 기록하세요.")
+        lock = self.cog.locks.get(self.channel_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self.cog.locks[self.channel_id] = lock
+
+        async with lock:
+            if not self.game.get('has_rolled', False):
+                await interaction.response.send_message("먼저 주사위를 굴려야 고정할 수 있어요!", ephemeral=True)
+                return
+
+            self.game['kept_dice'][index] = not self.game['kept_dice'][index]
+            self.update_buttons()
+            embed = self.create_embed_for_current_player(f"🎲 주사위: {self.dice_display()}", "주사위를 고정하거나 점수를 기록하세요.")
+
         try:
             await interaction.response.edit_message(embed=embed, view=self)
         except discord.NotFound:
@@ -367,18 +386,19 @@ class YachtGameView(discord.ui.View):
         for item in self.children:
             item.disabled = True
 
-        if self.game and self.game.get('last_message_id'):
-            channel = self.cog.bot.get_channel(self.channel_id)
-            if channel:
-                try:
-                    msg = await channel.fetch_message(self.game['last_message_id'])
-                    await msg.edit(view=self)
-                except discord.NotFound:
-                    logger.debug("타임아웃: 편집할 메시지가 없음")
-                except discord.Forbidden:
-                    logger.debug("타임아웃: 편집 권한 없음")
-                except discord.HTTPException:
-                    logger.exception("타임아웃 메시지 편집 실패")
+        # 자신의 메시지만 비활성화 (last_message_id는 현재 턴일 수 있음)
+        if self.cog.active_views.get(self.channel_id) is self:
+            self.cog.active_views.pop(self.channel_id, None)
+
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.NotFound:
+                logger.debug("타임아웃: 편집할 메시지가 없음")
+            except discord.Forbidden:
+                logger.debug("타임아웃: 편집 권한 없음")
+            except discord.HTTPException:
+                logger.exception("타임아웃 메시지 편집 실패")
 
         try:
             channel = self.ctx_or_channel if isinstance(self.ctx_or_channel, discord.abc.Messageable) else self.cog.bot.get_channel(self.channel_id)
@@ -393,6 +413,7 @@ class YachtDiceGame(commands.Cog):
         self.bot = bot
         self.games = {}
         self.locks = {}
+        self.active_views = {}  # channel_id -> YachtGameView
 
     def calculate_score(self, dice, category):
         # 각 주사위 값(1~6)의 개수를 계산
@@ -566,6 +587,25 @@ class YachtDiceGame(commands.Cog):
             except discord.HTTPException:
                 logger.exception("게임 시작 메시지 전송 실패")
 
+
+    async def _retire_active_view(self, channel_id: int):
+        """이전 턴 뷰를 중지·비활성화해 오래된 메시지에서 중복 조작을 막는다."""
+        old = self.active_views.pop(channel_id, None)
+        if old is None or old.is_finished():
+            return
+        old.stop()
+        for item in old.children:
+            item.disabled = True
+        if old.message:
+            try:
+                await old.message.edit(view=old)
+            except discord.NotFound:
+                logger.debug("이전 야추 뷰: 편집할 메시지가 없음")
+            except discord.Forbidden:
+                logger.debug("이전 야추 뷰: 편집 권한 없음")
+            except discord.HTTPException:
+                logger.exception("이전 야추 뷰 메시지 비활성화 실패")
+
     async def start_turn(self, ctx: commands.Context, channel_id: int):
         game = self.games.get(channel_id)
         if not game:
@@ -582,10 +622,13 @@ class YachtDiceGame(commands.Cog):
         )
         embed.add_field(name="턴 정보", value=f"턴 {game['turn_count'] + 1}/{len(game['players']) * 12}", inline=False)
 
+        await self._retire_active_view(channel_id)
         view = YachtGameView(self, ctx, channel_id)
 
         try:
             msg = await ctx.send(embed=embed, view=view)
+            view.message = msg
+            self.active_views[channel_id] = view
             game['last_message_id'] = msg.id
         except discord.HTTPException:
             logger.exception("턴 시작 메시지 전송 실패")
@@ -684,11 +727,14 @@ class YachtDiceGame(commands.Cog):
         )
         embed.add_field(name="턴 정보", value=f"턴 {game['turn_count'] + 1}/{len(game['players']) * 12}", inline=False)
 
+        await self._retire_active_view(channel_id)
         view = YachtGameView(self, channel, channel_id)
 
         if channel:
             try:
                 msg = await channel.send(embed=embed, view=view)
+                view.message = msg
+                self.active_views[channel_id] = view
                 game['last_message_id'] = msg.id
             except discord.HTTPException:
                 logger.exception("다음 턴 메시지 전송 실패")
@@ -716,6 +762,8 @@ class YachtDiceGame(commands.Cog):
         game = self.games.get(channel_id)
         if not game:
             return
+
+        await self._retire_active_view(channel_id)
 
         results = []
         for p_id in game['players']:
@@ -775,6 +823,8 @@ class YachtDiceGame(commands.Cog):
             if ctx.author.id != game['players'][0] and not can_manage:
                 await ctx.send("게임을 취소할 권한이 없습니다.", delete_after=10)
                 return
+
+            await self._retire_active_view(channel_id)
 
             try:
                 del self.games[channel_id]
