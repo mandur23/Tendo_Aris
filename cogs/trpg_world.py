@@ -315,8 +315,18 @@ class WorldAdventureView(discord.ui.View):
     async def on_timeout(self):
         for item in self.children:
             item.disabled = True
+        if self.cog.active_views.get(self.key) is self:
+            self.cog.active_views.pop(self.key, None)
         if self.message:
             await safe_edit_message(self.message, view=self)
+        try:
+            channel = self.message.channel if self.message else self.cog.bot.get_channel(self.key[1])
+            if channel:
+                await channel.send(
+                    "⏳ 자유 모험 버튼이 시간 초과로 비활성화됐어요. `!자유모험계속` 으로 다시 불러올 수 있어요."
+                )
+        except Exception:
+            logger.debug("자유 모험 View 타임아웃 알림 전송 실패", exc_info=True)
 
 
 class TRPGWorld(commands.Cog):

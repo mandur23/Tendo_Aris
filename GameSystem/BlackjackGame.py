@@ -98,6 +98,25 @@ class BlackjackView(discord.ui.View):
             if current_player_id != self.player_id or game['status'].get(self.player_id) != 'playing':
                 return
 
+            # hit/stand과 동일하게 이전 메시지의 버튼을 비활성화해 Interaction failed 방지
+            for item in self.children:
+                item.disabled = True
+            self.stop()
+            msg = self.message
+            if msg is None:
+                mid = game.get('last_message_id')
+                channel_for_msg = self.cog.bot.get_channel(self.channel_id)
+                if mid and channel_for_msg:
+                    try:
+                        msg = await channel_for_msg.fetch_message(mid)
+                    except discord.HTTPException:
+                        msg = None
+            if msg is not None:
+                try:
+                    await msg.edit(view=self)
+                except discord.HTTPException:
+                    logger.exception("블랙잭 타임아웃 메시지 편집 실패")
+
             game['status'][self.player_id] = 'stand'
             channel = self.cog.bot.get_channel(self.channel_id)
             if channel:
