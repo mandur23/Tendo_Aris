@@ -21,7 +21,6 @@ import discord
 from discord.ext import commands
 
 from GameSystem.TRPGEngine import (
-    CLASSES,
     roll_class_options,
     DEFAULT_DC,
     FREE_ACTION_DC,
@@ -87,13 +86,13 @@ class WorldGenreSelectView(AuthorLockedView):
 class WorldOwnerClassSelectView(AuthorLockedView):
     """세계를 여는 사람이 직업을 고르는 버튼 뷰. 직업을 고르면 캐릭터 모달이 열린다."""
 
-    def __init__(self, cog: "TRPGWorld", key: WorldKey, owner_id: int, genre_key: str):
+    def __init__(self, cog: "TRPGWorld", key: WorldKey, owner_id: int, genre_key: str, options: list):
         super().__init__(author_id=owner_id, timeout=SELECT_VIEW_TIMEOUT)
         self.cog = cog
         self.key = key
         self.genre_key = genre_key
 
-        for class_key, spec in roll_class_options(genre_key):
+        for class_key, spec in options:
             btn = discord.ui.Button(label=f"{spec['emoji']} {spec['label']}", style=discord.ButtonStyle.primary)
             btn.callback = functools.partial(self._class_cb, class_key=class_key)
             self.add_item(btn)
@@ -557,14 +556,16 @@ class TRPGWorld(commands.Cog):
             ),
             color=0x1ABC9C,
         )
-        for spec in CLASSES.values():
+        # 장르에 맞는 직업을 매번 새로 뽑는다. 버튼과 설명이 어긋나지 않도록 한 번만 뽑아 공유한다.
+        options = roll_class_options(genre_key)
+        for _, spec in options:
             stats = " / ".join(f"{k} +{v}" if v > 0 else f"{k} {v}" for k, v in spec["stats"].items())
             embed.add_field(
                 name=f"{spec['emoji']} {spec['label']}",
                 value=f"HP {spec['hp']}\n{stats}\n소지품: {', '.join(spec['items'])}",
                 inline=True,
             )
-        view = WorldOwnerClassSelectView(self, key, interaction.user.id, genre_key)
+        view = WorldOwnerClassSelectView(self, key, interaction.user.id, genre_key, options)
         try:
             await interaction.response.edit_message(embed=embed, view=view)
             view.message = interaction.message
