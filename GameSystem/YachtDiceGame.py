@@ -38,6 +38,8 @@ class RecordView(discord.ui.View):
             return
             
         dice = game['dice']
+        self.opened_dice = list(dice)
+        self.opened_turn = (game.get('current_player'), game.get('turn_count'))
 
         for cat in available_categories:
             score = self.cog.calculate_score(dice, cat)
@@ -48,7 +50,7 @@ class RecordView(discord.ui.View):
 
             b = discord.ui.Button(label=label, style=discord.ButtonStyle.primary)
 
-            async def _cat_cb(interaction: discord.Interaction, category, score):
+            async def _cat_cb(interaction: discord.Interaction, category):
                 if interaction.user.id != self.user.id:
                     if not interaction.response.is_done():
                         await interaction.response.send_message("이 카테고리는 당신이 선택할 수 없습니다.", ephemeral=True)
@@ -85,6 +87,16 @@ class RecordView(discord.ui.View):
                             await interaction.followup.send("이미 이 카테고리에 점수가 기록되어 있습니다.", ephemeral=True)
                         return
 
+                    current_dice = list(game['dice'])
+                    current_turn = (game.get('current_player'), game.get('turn_count'))
+                    if current_dice != self.opened_dice or current_turn != self.opened_turn:
+                        if not interaction.response.is_done():
+                            await interaction.response.send_message("주사위나 턴이 바뀌어 이 기록 창은 더 이상 유효하지 않습니다. 다시 열어 주세요.", ephemeral=True)
+                        else:
+                            await interaction.followup.send("주사위나 턴이 바뀌어 이 기록 창은 더 이상 유효하지 않습니다. 다시 열어 주세요.", ephemeral=True)
+                        return
+
+                    score = self.cog.calculate_score(current_dice, category)
                     game['scores'][self.user.id][category] = score
 
                     try:
@@ -122,7 +134,7 @@ class RecordView(discord.ui.View):
                 # 기록 완료 후 View 타임아웃을 멈춰, 이후 가짜 "시간 초과" 알림이 뜨지 않게 한다.
                 self.stop()
 
-            b.callback = functools.partial(_cat_cb, category=cat, score=score)
+            b.callback = functools.partial(_cat_cb, category=cat)
             self.add_item(b)
 
         cancel_btn = discord.ui.Button(label="취소", style=discord.ButtonStyle.secondary)
