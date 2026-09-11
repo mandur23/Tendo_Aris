@@ -356,8 +356,12 @@ class Music(commands.Cog):
         
         view.on_timeout = view_timeout
         
-        select = Select(placeholder="플레이리스트를 선택하세요", options=[discord.SelectOption(label=name, value=name) for name in
-                                                              self.playlists[user_id].keys()])
+        _pl_names = list(self.playlists[user_id].keys())[:25]
+        select = Select(placeholder="플레이리스트를 선택하세요", options=[
+            discord.SelectOption(label=(name[:97] + "...") if len(name) > 100 else name,
+                                 value=str(i))
+            for i, name in enumerate(_pl_names)
+        ])
 
         async def select_callback(interaction):
             # 권한 검증
@@ -365,9 +369,13 @@ class Music(commands.Cog):
                 await interaction.response.send_message("선생님, 다른 사람의 플레이리스트를 조작할 수 없어요!", ephemeral=True, delete_after=5)
                 return
             
-            playlist_name = select.values[0]
+            playlist_name = _pl_names[int(select.values[0])]
             playlist = self.playlists[user_id][playlist_name]
             playlist_str = "\n".join(f"{i + 1}. {url}" for i, url in enumerate(playlist))
+            list_content = f"선생님의 '{playlist_name}' 플레이리스트예요:\n{playlist_str}\n곡을 대기열에 추가할까요?"
+            if len(list_content) > 2000:
+                suffix = "\n... (너무 길어서 일부 내용만 보여드려요)"
+                list_content = list_content[:2000 - len(suffix)] + suffix
 
             confirm_view = View(timeout=30)
             
@@ -400,10 +408,8 @@ class Music(commands.Cog):
                 for url in playlist:
                     await player.queue.put(url)
 
-                response_message = await add_interaction.response.send_message(
+                await add_interaction.response.send_message(
                     f"선생님의 '{playlist_name}' 플레이리스트의 모든 곡을 대기열에 추가했어요!", ephemeral=True, delete_after=5)
-                await asyncio.sleep(3)
-                await response_message.delete()
 
             async def cancel_callback(cancel_interaction):
                 # 권한 검증
@@ -421,7 +427,7 @@ class Music(commands.Cog):
             confirm_view.add_item(add_button)
             confirm_view.add_item(cancel_button)
 
-            await interaction.response.send_message(f"선생님의 '{playlist_name}' 플레이리스트예요:\n{playlist_str}\n곡을 대기열에 추가할까요?",
+            await interaction.response.send_message(list_content,
                                                     view=confirm_view, ephemeral=True, delete_after=30)
 
         select.callback = select_callback
@@ -500,9 +506,13 @@ class Music(commands.Cog):
         
         view.on_timeout = view_timeout
         
+        _pl_names = list(self.playlists[user_id].keys())[:25]
         select = Select(placeholder="삭제할 플레이리스트를 선택하세요",
-                        options=[discord.SelectOption(label=name, value=name) for name in
-                                 self.playlists[user_id].keys()])
+                        options=[
+                            discord.SelectOption(label=(name[:97] + "...") if len(name) > 100 else name,
+                                                 value=str(i))
+                            for i, name in enumerate(_pl_names)
+                        ])
 
         async def select_callback(interaction):
             # 권한 검증
@@ -510,7 +520,7 @@ class Music(commands.Cog):
                 await interaction.response.send_message("선생님, 다른 사람의 플레이리스트를 조작할 수 없어요!", ephemeral=True, delete_after=5)
                 return
             
-            playlist_name = select.values[0]
+            playlist_name = _pl_names[int(select.values[0])]
             
             async def on_confirm(confirm_interaction):
                 del self.playlists[user_id][playlist_name]
@@ -560,7 +570,12 @@ class Music(commands.Cog):
             await delete_command_message(ctx)
             return
 
-        playlist_options = [discord.SelectOption(label=name, value=name) for name in self.playlists[user_id].keys()]
+        _pl_names = list(self.playlists[user_id].keys())[:25]
+        playlist_options = [
+            discord.SelectOption(label=(name[:97] + "...") if len(name) > 100 else name,
+                                 value=str(i))
+            for i, name in enumerate(_pl_names)
+        ]
         playlist_select = Select(placeholder="삭제할 플레이리스트를 선택하세요", options=playlist_options)
 
         playlist_view = View(timeout=60)
@@ -581,7 +596,7 @@ class Music(commands.Cog):
                 await interaction.response.send_message("선생님, 다른 사람의 플레이리스트를 조작할 수 없어요!", ephemeral=True, delete_after=5)
                 return
             
-            selected_playlist_name = playlist_select.values[0]
+            selected_playlist_name = _pl_names[int(playlist_select.values[0])]
             selected_playlist = self.playlists[user_id][selected_playlist_name]
 
             if not selected_playlist:
@@ -589,8 +604,12 @@ class Music(commands.Cog):
                                                         ephemeral=True, delete_after=5)
                 return
 
-            song_options = [discord.SelectOption(label=f"{i + 1}. {url}", value=str(i)) for i, url in
-                            enumerate(selected_playlist)]
+            song_options = []
+            for i, url in enumerate(selected_playlist[:25]):
+                label = f"{i + 1}. {url}"
+                if len(label) > 100:
+                    label = label[:97] + "..."
+                song_options.append(discord.SelectOption(label=label, value=str(i)))
             song_select = Select(placeholder="삭제할 노래를 선택하세요", options=song_options)
 
             song_view = View(timeout=60)
