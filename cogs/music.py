@@ -429,11 +429,13 @@ class Music(commands.Cog):
 
             await interaction.response.send_message(list_content,
                                                     view=confirm_view, ephemeral=True, delete_after=30)
+            confirm_view.message = await interaction.original_response()
 
         select.callback = select_callback
         view.add_item(select)
 
-        await ctx.send("선생님의 플레이리스트 목록이에요:", view=view, delete_after=60)
+        message = await ctx.send("선생님의 플레이리스트 목록이에요:", view=view, delete_after=60)
+        view.message = message
         await delete_command_message(ctx)
 
     @commands.command(name='플레이리스트추가', aliases=['프래이리스트추가', 'vmffpdlfltmxmcnrk'])
@@ -554,11 +556,13 @@ class Music(commands.Cog):
                 ephemeral=True,
                 delete_after=30
             )
+            confirm_view.message = await interaction.original_response()
 
         select.callback = select_callback
         view.add_item(select)
 
-        await ctx.send("선생님의 플레이리스트 목록이에요:", view=view, delete_after=60)
+        message = await ctx.send("선생님의 플레이리스트 목록이에요:", view=view, delete_after=60)
+        view.message = message
         await delete_command_message(ctx)
 
     @commands.command(name='플레이리스트노래삭제', aliases=['프래이리스트노래삭제'])
@@ -665,17 +669,20 @@ class Music(commands.Cog):
                     ephemeral=True,
                     delete_after=30
                 )
+                confirm_view.message = await interaction.original_response()
 
             song_select.callback = song_select_callback
             song_view.add_item(song_select)
 
             await interaction.response.send_message(f"선생님의 '{selected_playlist_name}' 플레이리스트에서 삭제할 노래를 선택하세요:",
                                                     view=song_view, ephemeral=True, delete_after=60)
+            song_view.message = await interaction.original_response()
 
         playlist_select.callback = playlist_select_callback
         playlist_view.add_item(playlist_select)
 
-        await ctx.send("선생님의 플레이리스트 목록이에요:", view=playlist_view, delete_after=60)
+        message = await ctx.send("선생님의 플레이리스트 목록이에요:", view=playlist_view, delete_after=60)
+        playlist_view.message = message
         await delete_command_message(ctx)
 
     # ========== 히스토리 관련 명령어 ==========
@@ -752,7 +759,8 @@ class Music(commands.Cog):
             next_button.callback = next_callback
             view.add_item(next_button)
         
-        await ctx.send(embed=embed, view=view, delete_after=60)
+        message = await ctx.send(embed=embed, view=view, delete_after=60)
+        view.message = message
         await delete_command_message(ctx)
 
     @commands.command(name='다시재생', aliases=['replay', '재재생', 'playagain'])
@@ -1078,11 +1086,13 @@ class Music(commands.Cog):
             await interaction.response.send_message(
                 f"**{formatted_date}에 들었던 노래들:**\n```{song_list}```\n이 노래들을 대기열에 추가할까요?",
                 view=confirm_view, ephemeral=True, delete_after=30)
+            confirm_view.message = await interaction.original_response()
         
         select.callback = date_select_callback
         view.add_item(select)
         
-        await ctx.send(embed=embed, view=view, delete_after=60)
+        message = await ctx.send(embed=embed, view=view, delete_after=60)
+        view.message = message
         await delete_command_message(ctx)
 
     @commands.command(name='이번주재생', aliases=['weekplay', '주간재생'])
