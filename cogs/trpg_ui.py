@@ -163,5 +163,6 @@ async def run_class_creation(
     view = GeneratedClassView(author_id=interaction.user.id, on_accept=_accept, on_retry=_retry)
     try:
         await interaction.edit_original_response(content=None, embed=generated_class_embed(spec, concept), view=view)
+        view.message = await interaction.original_response()
     except discord.HTTPException:
         logger.debug("생성된 직업 표시 실패 (무시됨)")

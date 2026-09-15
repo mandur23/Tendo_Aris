@@ -687,8 +687,9 @@ class TRPGWorld(commands.Cog):
         try:
             if not interaction.response.is_done():
                 await interaction.response.send_message("합류할 캐릭터의 직업을 선택하세요!", view=view, ephemeral=True)
+                view.message = await interaction.original_response()
             else:
-                await interaction.followup.send("합류할 캐릭터의 직업을 선택하세요!", view=view, ephemeral=True)
+                view.message = await interaction.followup.send("합류할 캐릭터의 직업을 선택하세요!", view=view, ephemeral=True)
         except discord.HTTPException:
             logger.exception("합류 직업 선택 표시 실패")
 
