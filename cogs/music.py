@@ -688,13 +688,21 @@ class Music(commands.Cog):
     # ========== 히스토리 관련 명령어 ==========
 
     @commands.command(name='히스토리', aliases=['history', '기록', 'record'])
-    async def show_history(self, ctx, page: int = 1):
+    async def show_history(self, ctx, page: int = 1, *, interaction: discord.Interaction = None):
         """재생 기록을 보여줍니다."""
         guild_id_str = str(ctx.guild.id)
         
         if guild_id_str not in self.history or not self.history[guild_id_str]:
-            await ctx.send("선생님, 아직 재생 기록이 없어요! 노래를 들어보시면 기록이 남을 거예요~", delete_after=10)
-            await delete_command_message(ctx)
+            empty_msg = "선생님, 아직 재생 기록이 없어요! 노래를 들어보시면 기록이 남을 거예요~"
+            if interaction is not None:
+                # 페이지 전환 중 기록이 비면 interaction에 응답해야 Interaction failed 방지
+                if interaction.response.is_done():
+                    await interaction.followup.send(empty_msg, ephemeral=True)
+                else:
+                    await interaction.response.edit_message(content=empty_msg, embed=None, view=None)
+            else:
+                await ctx.send(empty_msg, delete_after=10)
+                await delete_command_message(ctx)
             return
         
         history_list = self.history[guild_id_str]
@@ -740,9 +748,9 @@ class Music(commands.Cog):
                 if interaction.user.id != ctx.author.id:
                     await interaction.response.send_message("선생님, 다른 사람의 히스토리를 조작할 수 없어요!", ephemeral=True, delete_after=5)
                     return
-                await interaction.response.defer()
-                # 명령어를 재귀적으로 호출
-                await self.show_history(ctx, page - 1)
+                view.stop()
+                # 같은 메시지를 페이지 전환으로 편집 (고아 View 방지)
+                await self.show_history(ctx, page - 1, interaction=interaction)
             prev_button.callback = prev_callback
             view.add_item(prev_button)
         
@@ -753,15 +761,19 @@ class Music(commands.Cog):
                 if interaction.user.id != ctx.author.id:
                     await interaction.response.send_message("선생님, 다른 사람의 히스토리를 조작할 수 없어요!", ephemeral=True, delete_after=5)
                     return
-                await interaction.response.defer()
-                # 명령어를 재귀적으로 호출
-                await self.show_history(ctx, page + 1)
+                view.stop()
+                # 같은 메시지를 페이지 전환으로 편집 (고아 View 방지)
+                await self.show_history(ctx, page + 1, interaction=interaction)
             next_button.callback = next_callback
             view.add_item(next_button)
         
-        message = await ctx.send(embed=embed, view=view, delete_after=60)
-        view.message = message
-        await delete_command_message(ctx)
+        if interaction is not None:
+            await interaction.response.edit_message(embed=embed, view=view)
+            view.message = interaction.message
+        else:
+            message = await ctx.send(embed=embed, view=view, delete_after=60)
+            view.message = message
+            await delete_command_message(ctx)
 
     @commands.command(name='다시재생', aliases=['replay', '재재생', 'playagain'])
     async def replay_from_history(self, ctx, index: int = 1):
