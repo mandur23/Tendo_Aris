@@ -412,6 +412,7 @@ class BlackjackGame(commands.Cog):
         view = BlackjackView(self, channel_id, p_id)
         try:
             msg = await channel.send(embed=embed, view=view)
+            view.message = msg
             game['last_message_id'] = msg.id
         except discord.HTTPException:
             logger.exception("블랙잭 턴 메시지 전송 실패")
