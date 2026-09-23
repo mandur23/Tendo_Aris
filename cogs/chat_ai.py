@@ -19,7 +19,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 from urllib import error, request
 
 import discord
@@ -34,6 +34,7 @@ from utils.config import (
     LOCAL_AI_MODEL,
     LOCAL_AI_NUM_CTX,
     LOCAL_AI_NUM_PREDICT,
+    LOCAL_AI_STREAM_REPLIES,
     LOCAL_AI_TEMPERATURE,
     LOCAL_AI_TIMEOUT_SECONDS,
     LOCAL_AI_WEB_SEARCH_ENABLED,
@@ -214,6 +215,123 @@ class _ChatSession:
             self.history = self.history[-SESSION_HISTORY_HARD_CAP:]
 
 
+# 스트리밍 답변 메시지 편집 간격(초). Discord 는 채널당 메시지 편집을 약 5초에 5회로 제한하므로
+# 그보다 여유 있게 잡는다. (초과하면 discord.py 가 429 로 대기하며 오히려 더 늦게 보인다)
+STREAM_EDIT_INTERVAL = 1.2
+# 생성 중임을 보여주는 커서
+STREAM_CURSOR = " ▌"
+# 생성 중 미리보기 최대 길이 (Discord 2000자 제한 안쪽). 전체 답변은 완료 후 나눠 보낸다.
+STREAM_PREVIEW_MAX = 1800
+
+
+class _ReplyStreamer:
+    """LLM 스레드에서 오는 부분 답변을 받아 Discord 메시지 하나를 주기적으로 고쳐 쓴다.
+
+    - 첫 토큰이 오면 바로 메시지를 보내고, 이후에는 STREAM_EDIT_INTERVAL 마다 최신 내용으로 편집한다.
+    - 생성 중에는 외래 문자를 걸러 보여 준다 (최종 답변은 기존 한국어 보장 로직을 거친다).
+    - finish() 로 최종 답변을 확정하고, 길면 이어지는 메시지로 나눠 보낸다.
+    """
+
+    def __init__(self, ctx, *, interval: float = STREAM_EDIT_INTERVAL):
+        self._ctx = ctx
+        self._loop = asyncio.get_running_loop()
+        self._interval = interval
+        self._latest = ""
+        self._shown: Optional[str] = None
+        self._changed = asyncio.Event()
+        self._closing = asyncio.Event()
+        self._task: Optional[asyncio.Task] = None
+        self.message: Optional[discord.Message] = None
+
+    # ---------------------------------------------------------------- 입력 (LLM 스레드)
+    def feed_threadsafe(self, text: str) -> None:
+        """LLM 스레드에서 호출한다: 지금까지 생성된 답변 전체를 전달한다."""
+        try:
+            self._loop.call_soon_threadsafe(self._feed, text)
+        except RuntimeError:
+            pass  # 이벤트 루프가 이미 닫힘 (종료 중)
+
+    def _feed(self, text: str) -> None:
+        if self._closing.is_set():
+            return
+        self._latest = text
+        self._changed.set()
+        if self._task is None:
+            self._task = asyncio.create_task(self._pump())
+
+    # ---------------------------------------------------------------- 출력 (이벤트 루프)
+    @staticmethod
+    def _render_preview(text: str) -> str:
+        body = strip_non_korean(text)
+        if not body:
+            return ""
+        if len(body) > STREAM_PREVIEW_MAX:
+            body = body[:STREAM_PREVIEW_MAX] + " …"
+        return f"아리스: {body}{STREAM_CURSOR}"
+
+    async def _show(self, content: str) -> None:
+        if self.message is None:
+            self.message = await self._ctx.send(content)
+        else:
+            await self.message.edit(content=content)
+        self._shown = content
+
+    async def _pump(self) -> None:
+        try:
+            while True:
+                await self._changed.wait()
+                if self._closing.is_set():
+                    return
+                self._changed.clear()
+                content = self._render_preview(self._latest)
+                if content and content != self._shown:
+                    await self._show(content)
+                # 편집 간격을 두되, 완료되면 기다리지 않고 바로 빠져나간다.
+                try:
+                    await asyncio.wait_for(self._closing.wait(), timeout=self._interval)
+                    return
+                except asyncio.TimeoutError:
+                    pass
+        except discord.HTTPException as e:
+            # 미리보기 실패는 치명적이지 않다: 최종 답변은 finish() 가 다시 보낸다.
+            logger.debug(f"스트리밍 미리보기 전송 실패 (무시됨): {e}")
+
+    async def _stop(self) -> None:
+        # 진행 중인 전송·편집이 끝날 때까지 기다린다. (취소하면 보낸 메시지를 놓칠 수 있다)
+        self._closing.set()
+        self._changed.set()
+        if self._task is not None:
+            await self._task
+
+    async def finish(self, chunks: List[str]) -> None:
+        """최종 답변을 확정한다. 첫 조각은 미리보기 메시지를 고쳐 쓰고, 나머지는 이어서 보낸다."""
+        await self._stop()
+        if not chunks:
+            await self.discard()
+            return
+        first = f"아리스: {chunks[0]}"
+        if self.message is None:
+            await self._ctx.send(first)
+        elif self._shown != first:
+            try:
+                await self.message.edit(content=first)
+            except discord.NotFound:
+                # 사용자가 미리보기 메시지를 지웠으면 새로 보낸다.
+                await self._ctx.send(first)
+        for chunk in chunks[1:]:
+            await self._ctx.send(f"(계속) {chunk}")
+
+    async def discard(self) -> None:
+        """답변을 쓰지 않게 되었을 때(오류·세션 종료) 미리보기 메시지를 지운다."""
+        await self._stop()
+        if self.message is not None:
+            try:
+                await self.message.delete()
+            except discord.HTTPException:
+                pass
+            self.message = None
+
+
 class ChatAI(commands.Cog):
     """로컬 LLM(Ollama) 기반 대화형 AI 기능 + '블루 아카이브 아리스' 페르소나 + 대화 세션."""
 
@@ -294,23 +412,30 @@ class ChatAI(commands.Cog):
             with OLLAMA_SEMAPHORE:
                 with request.urlopen(req, timeout=LOCAL_AI_TIMEOUT_SECONDS) as resp:
                     raw = resp.read().decode("utf-8")
-        except error.HTTPError as e:
-            detail = e.read().decode("utf-8", errors="ignore") if hasattr(e, "read") else str(e)
-            if e.code == 404 and "not found" in detail and "model" in detail:
-                raise FileNotFoundError(detail) from e
-            raise RuntimeError(f"로컬 AI HTTP 오류({e.code}): {detail[:200]}") from e
-        except error.URLError as e:
-            # 연결 단계에서 발생한 타임아웃은 URLError로 감싸져 온다.
-            if isinstance(getattr(e, "reason", None), TimeoutError):
-                raise RuntimeError("로컬 AI 응답 시간 초과가 발생했습니다.") from e
-            raise RuntimeError("로컬 AI 서버에 연결할 수 없습니다. Ollama 실행 상태를 확인해주세요.") from e
-        except TimeoutError as e:
-            raise RuntimeError("로컬 AI 응답 시간 초과가 발생했습니다.") from e
+        except (error.URLError, TimeoutError) as e:
+            raise self._translate_ollama_error(e) from e
 
         try:
             return json.loads(raw)
         except json.JSONDecodeError as e:
             raise RuntimeError("로컬 AI 응답을 해석하지 못했습니다.") from e
+
+    @staticmethod
+    def _translate_ollama_error(e: Exception) -> Exception:
+        """Ollama 호출 예외를 사용자에게 보여줄 예외로 바꾼다. 모델 없음은 FileNotFoundError."""
+        if isinstance(e, error.HTTPError):
+            detail = e.read().decode("utf-8", errors="ignore") if hasattr(e, "read") else str(e)
+            if e.code == 404 and "not found" in detail and "model" in detail:
+                return FileNotFoundError(detail)
+            return RuntimeError(f"로컬 AI HTTP 오류({e.code}): {detail[:200]}")
+        if isinstance(e, error.URLError):
+            # 연결 단계에서 발생한 타임아웃은 URLError로 감싸져 온다.
+            if isinstance(getattr(e, "reason", None), TimeoutError):
+                return RuntimeError("로컬 AI 응답 시간 초과가 발생했습니다.")
+            return RuntimeError("로컬 AI 서버에 연결할 수 없습니다. Ollama 실행 상태를 확인해주세요.")
+        if isinstance(e, TimeoutError):
+            return RuntimeError("로컬 AI 응답 시간 초과가 발생했습니다.")
+        return e
 
     def _fetch_installed_models_sync(self) -> List[str]:
         endpoint = f"{LOCAL_AI_BASE_URL.rstrip('/')}/api/tags"
@@ -370,20 +495,21 @@ class ChatAI(commands.Cog):
             }
         return result
 
-    def _request_chat_once(
+    def _build_chat_payload(
         self,
         model_name: str,
         messages: List[Dict[str, str]],
-        extra_system: str = "",
-        turn_context: str = "",
-    ) -> str:
-        endpoint = f"{LOCAL_AI_BASE_URL.rstrip('/')}/api/chat"
+        extra_system: str,
+        turn_context: str,
+        *,
+        stream: bool,
+    ) -> dict:
         system_content = SYSTEM_PROMPT if not extra_system else f"{SYSTEM_PROMPT}\n\n{extra_system}"
-        payload = {
+        return {
             "model": model_name,
             "messages": [{"role": "system", "content": system_content}]
             + self._attach_turn_context(messages, turn_context),
-            "stream": False,
+            "stream": stream,
             # 유휴 후 모델이 메모리에서 내려가 첫 응답이 느려지는 것을 방지
             "keep_alive": LOCAL_AI_KEEP_ALIVE,
             "options": {
@@ -394,9 +520,69 @@ class ChatAI(commands.Cog):
                 "num_predict": LOCAL_AI_NUM_PREDICT,
             },
         }
+
+    def _request_chat_once(
+        self,
+        model_name: str,
+        messages: List[Dict[str, str]],
+        extra_system: str = "",
+        turn_context: str = "",
+    ) -> str:
+        endpoint = f"{LOCAL_AI_BASE_URL.rstrip('/')}/api/chat"
+        payload = self._build_chat_payload(model_name, messages, extra_system, turn_context, stream=False)
         parsed = self._post_json_sync(endpoint, payload)
         message = parsed.get("message", {})
         output_text = (message.get("content") or "").strip()
+        if not output_text:
+            raise RuntimeError("로컬 AI가 빈 응답을 반환했습니다.")
+        return output_text
+
+    def _request_chat_stream(
+        self,
+        model_name: str,
+        messages: List[Dict[str, str]],
+        extra_system: str = "",
+        turn_context: str = "",
+        on_partial: Optional[Callable[[str], None]] = None,
+    ) -> str:
+        """Ollama /api/chat 를 스트리밍으로 호출한다. 토큰이 올 때마다 on_partial(지금까지의 전체 텍스트).
+
+        응답은 줄마다 JSON 한 개(NDJSON)이며, 마지막 줄에 done=true 가 온다.
+        """
+        endpoint = f"{LOCAL_AI_BASE_URL.rstrip('/')}/api/chat"
+        payload = self._build_chat_payload(model_name, messages, extra_system, turn_context, stream=True)
+        req = request.Request(
+            endpoint,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        parts: List[str] = []
+        try:
+            with OLLAMA_SEMAPHORE:
+                with request.urlopen(req, timeout=LOCAL_AI_TIMEOUT_SECONDS) as resp:
+                    for raw_line in resp:
+                        line = raw_line.strip()
+                        if not line:
+                            continue
+                        try:
+                            chunk = json.loads(line)
+                        except json.JSONDecodeError as e:
+                            raise RuntimeError("로컬 AI 응답을 해석하지 못했습니다.") from e
+                        if chunk.get("error"):
+                            raise RuntimeError(f"로컬 AI 오류: {str(chunk['error'])[:200]}")
+                        piece = (chunk.get("message") or {}).get("content") or ""
+                        if piece:
+                            parts.append(piece)
+                            if on_partial is not None:
+                                on_partial("".join(parts))
+                        if chunk.get("done"):
+                            break
+        except (error.URLError, TimeoutError) as e:
+            raise self._translate_ollama_error(e) from e
+
+        output_text = "".join(parts).strip()
         if not output_text:
             raise RuntimeError("로컬 AI가 빈 응답을 반환했습니다.")
         return output_text
@@ -407,11 +593,22 @@ class ChatAI(commands.Cog):
         messages: List[Dict[str, str]],
         extra_system: str = "",
         turn_context: str = "",
+        on_partial: Optional[Callable[[str], None]] = None,
     ) -> str:
-        """한국어 전용 응답 보장: 비-한국어 외래 문자 발견 시 1회 재시도 후 silent cleanup."""
-        reply = self._request_chat_once(
-            model_name, messages, extra_system=extra_system, turn_context=turn_context
-        )
+        """한국어 전용 응답 보장: 비-한국어 외래 문자 발견 시 1회 재시도 후 silent cleanup.
+
+        on_partial 이 주어지면 첫 시도를 스트리밍으로 받아 생성되는 대로 전달한다.
+        (재시도는 드물고 전체를 다시 써야 하므로 한 번에 받아 최종 답변으로 교체한다)
+        """
+        if on_partial is not None:
+            reply = self._request_chat_stream(
+                model_name, messages, extra_system=extra_system, turn_context=turn_context,
+                on_partial=on_partial,
+            )
+        else:
+            reply = self._request_chat_once(
+                model_name, messages, extra_system=extra_system, turn_context=turn_context
+            )
         if not contains_non_korean(reply):
             return reply
 
@@ -447,6 +644,7 @@ class ChatAI(commands.Cog):
         history: Optional[List[Dict[str, str]]] = None,
         summary: str = "",
         extra_contexts: Optional[List[str]] = None,
+        on_partial: Optional[Callable[[str], None]] = None,
     ) -> str:
         # 히스토리에 저장되는 것과 동일한 "(이름) 내용" 형식을 항상 사용해
         # 첫 메시지와 이후 컨텍스트의 형식이 어긋나지 않도록 한다.
@@ -468,7 +666,8 @@ class ChatAI(commands.Cog):
 
         try:
             return self._request_chat_korean(
-                self.active_model, messages, extra_system=extra_system, turn_context=turn_context
+                self.active_model, messages, extra_system=extra_system, turn_context=turn_context,
+                on_partial=on_partial,
             )
         except FileNotFoundError:
             installed_models = self._fetch_installed_models_sync()
@@ -485,7 +684,8 @@ class ChatAI(commands.Cog):
             )
             logger.warning(f"로컬 AI 모델 자동 전환: {old_model} -> {fallback_model}")
             return self._request_chat_korean(
-                self.active_model, messages, extra_system=extra_system, turn_context=turn_context
+                self.active_model, messages, extra_system=extra_system, turn_context=turn_context,
+                on_partial=on_partial,
             )
 
     async def _generate_ai_reply(
@@ -495,6 +695,7 @@ class ChatAI(commands.Cog):
         history: Optional[List[Dict[str, str]]] = None,
         summary: str = "",
         extra_contexts: Optional[List[str]] = None,
+        on_partial: Optional[Callable[[str], None]] = None,
     ) -> str:
         if not self._is_ai_available():
             raise ValueError("로컬 AI 설정이 비어 있습니다.")
@@ -504,7 +705,8 @@ class ChatAI(commands.Cog):
             raise ValueError("질문 내용이 비어있습니다.")
 
         return await run_llm(
-            self._call_local_ai_sync, prepared_prompt, username, history, summary, extra_contexts
+            self._call_local_ai_sync, prepared_prompt, username, history, summary, extra_contexts,
+            on_partial=on_partial,
         )
 
     # ------------------------------------------------------------------ TRPG 모험 컨텍스트
@@ -1031,8 +1233,12 @@ class ChatAI(commands.Cog):
         reply: str,
         *,
         session: Optional[_ChatSession],
+        streamer: Optional["_ReplyStreamer"] = None,
     ) -> None:
-        """답변 텍스트를 채널에 전송하고, 세션이 TTS 모드면 음성도 함께 재생한다."""
+        """답변 텍스트를 채널에 전송하고, 세션이 TTS 모드면 음성도 함께 재생한다.
+
+        streamer 가 있으면 생성 중에 보여 준 미리보기 메시지를 최종 답변으로 고쳐 쓴다.
+        """
         chunks = self._split_message(reply)
         switch_notice = self._consume_switch_notice()
         if switch_notice:
@@ -1041,9 +1247,12 @@ class ChatAI(commands.Cog):
             except discord.HTTPException:
                 pass
 
-        for idx, chunk in enumerate(chunks):
-            prefix = "아리스: " if idx == 0 else "(계속) "
-            await ctx.send(f"{prefix}{chunk}")
+        if streamer is not None:
+            await streamer.finish(chunks)
+        else:
+            for idx, chunk in enumerate(chunks):
+                prefix = "아리스: " if idx == 0 else "(계속) "
+                await ctx.send(f"{prefix}{chunk}")
 
         use_tts = bool(session and session.use_tts)
         if not use_tts:
@@ -1197,6 +1406,8 @@ class ChatAI(commands.Cog):
             if self._sessions.get(key) is not session:
                 return
 
+            # 답변을 생성되는 대로 보여 준다 (첫 글자까지의 대기 시간이 짧아진다).
+            streamer = _ReplyStreamer(ctx) if LOCAL_AI_STREAM_REPLIES else None
             try:
                 async with safe_typing(ctx):
                     trpg_context, knowledge_context, web_context = await self._gather_contexts(
@@ -1206,9 +1417,13 @@ class ChatAI(commands.Cog):
                         prompt, author_name,
                         history=session.history, summary=session.summary,
                         extra_contexts=[trpg_context, knowledge_context, web_context],
+                        on_partial=streamer.feed_threadsafe if streamer else None,
                     )
             except Exception as e:
                 logger.error(f"AI 응답 생성 오류: {e}", exc_info=True)
+                if streamer is not None:
+                    # 중간까지 보여 준 답변은 히스토리에 남지 않으므로 지운다.
+                    await streamer.discard()
                 try:
                     await ctx.send(
                         f"선생님, 답변 생성 중 오류가 발생했어요: {str(e)[:100]}",
@@ -1220,6 +1435,8 @@ class ChatAI(commands.Cog):
 
             # 응답 생성 중 세션이 종료되었으면 뒤늦은 답변을 보내지 않는다.
             if self._sessions.get(key) is not session:
+                if streamer is not None:
+                    await streamer.discard()
                 return
 
             # 호출 실패 시 컨텍스트가 오염되지 않도록 응답이 성공했을 때만 히스토리에 반영한다.
@@ -1227,7 +1444,7 @@ class ChatAI(commands.Cog):
             session.add_assistant(reply)
             session.touch()
 
-            await self._send_reply_with_optional_tts(ctx, reply, session=session)
+            await self._send_reply_with_optional_tts(ctx, reply, session=session, streamer=streamer)
 
             # 답변 전송을 마친 뒤 히스토리가 길면 오래된 부분을 요약으로 압축한다 (장기 기억).
             await self._maybe_compact_history(session)

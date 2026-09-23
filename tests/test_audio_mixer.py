@@ -108,6 +108,7 @@ def test_스킵은_음악만_끝내고_TTS_는_유지한다():
     mixer.add_overlay(FakeSource(300, 100), tts_done)
 
     assert mixer.stop_main()
+    am.drain_cleanup()
     assert music_done.calls == [None] and music.cleaned
     assert tts_done.calls == []
     assert samples(mixer.read())[0] > 0
@@ -120,6 +121,7 @@ def test_메인_교체는_이전_곡_콜백을_부르지_않는다():
     old = FakeSource(1000, 100)
     mixer.set_main(old, old_done)
     mixer.set_main(FakeSource(500, 100), Recorder())
+    am.drain_cleanup()
     assert old.cleaned and old_done.calls == []
 
 
@@ -227,6 +229,7 @@ def test_일시정지된_음악을_스킵하면_재생을_정리한다():
         await am.play_main(vc, FakeSource(1000, 100), music_done)
         vc.pause()
         assert am.stop_main(vc)
+        am.drain_cleanup()
         assert music_done.calls == [None]
         assert not vc.is_playing() and not vc.is_paused()
 
@@ -336,3 +339,28 @@ def test_홀드_중_다음_곡으로_넘어가면_새_곡은_바로_재생된다
         assert not am.release_held_main(vc)    # TTS 가 끝나도 새 곡을 멈추지 않는다
 
     asyncio.run(scenario())
+
+
+def test_스킵_정리는_이벤트_루프를_막지_않는다():
+    """FFmpeg 정리가 오래 걸려도 stop_main 은 바로 돌아와야 한다."""
+    import threading
+    import time
+
+    release = threading.Event()
+
+    class SlowCleanup(FakeSource):
+        def cleanup(self):
+            release.wait(2)
+            super().cleanup()
+
+    mixer = MixerSource()
+    done = Recorder()
+    music = SlowCleanup(1000, 100)
+    mixer.set_main(music, done)
+    started = time.perf_counter()
+    assert mixer.stop_main()
+    assert time.perf_counter() - started < 0.1
+    assert done.calls == []            # 아직 정리 중
+    release.set()
+    am.drain_cleanup()
+    assert music.cleaned and done.calls == [None]

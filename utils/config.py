@@ -112,6 +112,10 @@ LOCAL_AI_MAX_CONCURRENCY = max(1, min(8, LOCAL_AI_MAX_CONCURRENCY))
 # 켜져 있으면 매 메시지마다 LLM이 검색 필요 여부를 판단하고, 필요할 때만 검색 결과를 참고해 답한다.
 LOCAL_AI_WEB_SEARCH_ENABLED = os.getenv('LOCAL_AI_WEB_SEARCH_ENABLED', 'true').strip().lower() in ('1', 'true', 'yes', 'on')
 
+# 대화형 AI 답변 스트리밍: 켜져 있으면 답변이 생성되는 대로 메시지를 이어서 고쳐 쓴다.
+# (끄면 예전처럼 답변이 다 만들어진 뒤 한 번에 보낸다)
+LOCAL_AI_STREAM_REPLIES = os.getenv('LOCAL_AI_STREAM_REPLIES', 'true').strip().lower() in ('1', 'true', 'yes', 'on')
+
 try:
     WEB_SEARCH_MAX_RESULTS = int(os.getenv('WEB_SEARCH_MAX_RESULTS', '3'))
 except (TypeError, ValueError):

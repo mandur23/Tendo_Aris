@@ -36,6 +36,7 @@
 
 ### 🤖 대화형 AI 기능
 - **AI 질의응답**: 로컬 LLM(Ollama) 기반 자연어 대화
+- **실시간 답변 표시**: 답변이 생성되는 대로 메시지를 이어서 고쳐 써서, 긴 답변도 바로 읽기 시작할 수 있음
 - **음성 연계**: AI 답변을 TTS로 바로 읽기 가능
 - **명령어/슬래시 지원**: Prefix 명령어와 `/ai` 그룹 모두 제공
 - **TRPG 모험 연동**: 진행 중인(또는 저장된) TRPG 모험의 세계관·퀘스트·캐릭터를 대화에서 물어보면 답변에 반영
@@ -132,6 +133,8 @@ LOCAL_AI_MAX_CONCURRENCY=2
 LOCAL_AI_WEB_SEARCH_ENABLED=true
 WEB_SEARCH_MAX_RESULTS=3
 WEB_SEARCH_TIMEOUT_SECONDS=10
+# 대화 AI 답변 스트리밍 (기본값 켜짐) — 끄면 답변이 다 만들어진 뒤 한 번에 보냄
+LOCAL_AI_STREAM_REPLIES=true
 ```
 
 #### 3.2 FFmpeg 설치 및 경로 설정

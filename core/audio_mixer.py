@@ -16,6 +16,7 @@ MixerSource 는 음성 클라이언트가 재생하는 단일 소스로, 안에 
 import asyncio
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, List, Optional, Tuple
 
 import discord
@@ -41,6 +42,17 @@ _PLAY_RETRIES = 20
 _PLAY_RETRY_DELAY = 0.02
 
 AfterCallback = Optional[Callable[[Optional[Exception]], None]]
+
+# 스킵·교체처럼 이벤트 루프에서 소스를 끝낼 때 FFmpeg 정리를 맡기는 스레드.
+# discord.py 의 FFmpeg 정리는 프로세스를 죽인 뒤 파이프가 닫힐 때까지 기다리므로
+# 스트리밍 중인 곡은 수~수십 ms 가 걸린다(측정: 로컬 스트림 약 7~9ms). 이벤트 루프에서 하면
+# 그동안 봇 전체가 멈추므로 넘긴다. 워커를 하나로 두어 정리·콜백 순서를 유지한다.
+_CLEANUP_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="audio-cleanup")
+
+
+def drain_cleanup(timeout: Optional[float] = 5.0) -> None:
+    """앞서 넘긴 정리 작업이 모두 끝날 때까지 기다린다. (테스트·종료용)"""
+    _CLEANUP_EXECUTOR.submit(lambda: None).result(timeout)
 
 
 def _pad(data: bytes) -> bytes:
@@ -137,7 +149,7 @@ class MixerSource(discord.AudioSource):
             old = self._main
             self._main, self._main_after = source, after
         if old is not None and old is not source:
-            _cleanup_source(old)
+            _CLEANUP_EXECUTOR.submit(_cleanup_source, old)
         return True
 
     def stop_main(self) -> bool:
@@ -147,7 +159,8 @@ class MixerSource(discord.AudioSource):
             self._main = self._main_after = None
         if main is None:
             return False
-        _finish([(main, after)])
+        # 이벤트 루프에서 불리므로 FFmpeg 정리와 콜백(다음 곡 진행)은 정리 스레드에서 한다.
+        _CLEANUP_EXECUTOR.submit(_finish, [(main, after)])
         return True
 
     def add_overlay(self, source: discord.AudioSource, after: AfterCallback = None) -> bool:

@@ -15,7 +15,7 @@ def test_extra_system_조합():
     cog = ChatAI(None)
     captured = {}
 
-    def fake_request(model, messages, extra_system="", turn_context=""):
+    def fake_request(model, messages, extra_system="", turn_context="", on_partial=None):
         captured["extra_system"] = extra_system
         captured["turn_context"] = turn_context
         captured["messages"] = messages
