@@ -195,7 +195,12 @@ def text_to_speech_supertonic(
         temp_path = Path(temp_file.name)
         temp_file.close()
 
-        tts.save_audio(wav, str(temp_path))
+        try:
+            tts.save_audio(wav, str(temp_path))
+        except Exception:
+            # 저장에 실패한 빈 임시 파일이 쌓이지 않도록 지운다.
+            temp_path.unlink(missing_ok=True)
+            raise
 
         logger.info(
             f"Supertonic TTS 생성 완료: voice={voice_name}, lang={lang}, "

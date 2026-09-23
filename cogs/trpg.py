@@ -40,7 +40,7 @@ from cogs.trpg_ui import (
 from utils.config import LOCAL_AI_MODEL
 from utils.discord_utils import AuthorLockedView, safe_defer, safe_edit_message
 from utils.file_utils import delete_trpg_save, load_trpg_saves, set_trpg_save
-from utils.llm_utils import check_model_available, is_local_ai_configured
+from utils.llm_utils import check_model_available, is_local_ai_configured, run_llm
 from utils.trpg_dice import player_roll_check
 
 logger = logging.getLogger(__name__)
@@ -477,7 +477,7 @@ class TRPG(commands.Cog):
 
             try:
                 async with interaction.channel.typing():
-                    adv = await asyncio.to_thread(
+                    adv = await run_llm(
                         generate_scenario, genre_key, character, model=self._model()
                     )
             except FileNotFoundError:
@@ -578,7 +578,7 @@ class TRPG(commands.Cog):
             in_combat_action = adv.combat is not None and (choice or {}).get("combat") in ("attack", "defend")
             # 자유 행동은 선언한 내용에 맞는 능력치로 판정한다 (예: 자물쇠 따기 → 민첩).
             if fate_roll and stat is None and not in_combat_action:
-                stat, dc = await asyncio.to_thread(
+                stat, dc = await run_llm(
                     judge_free_action, action_text, adv.character, model=self._model()
                 )
 
@@ -624,7 +624,7 @@ class TRPG(commands.Cog):
 
             try:
                 async with channel.typing():
-                    adv, result = await asyncio.to_thread(
+                    adv, result = await run_llm(
                         run_solo_turn, adv, action_text, check, choice=choice, model=self._model()
                     )
                     self.adventures[key] = adv

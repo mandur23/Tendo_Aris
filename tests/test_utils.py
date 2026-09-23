@@ -96,3 +96,39 @@ def test_지식검색_섹션단위_청크와_점수(knowledge_dir):
     assert hits and "존중" in hits[0]["text"]
     assert ku.search_knowledge("완전히무관한외계어쿼리zzz") == []
     assert ku.search_knowledge("") == []
+
+
+def test_TTS_임시파일_정리는_오래된_파일만_지운다(tmp_path, monkeypatch):
+    import os
+    import time
+    import utils.tts_utils as tts_utils
+
+    monkeypatch.setattr(tts_utils, "TTS_TEMP_DIR", tmp_path)
+    old = tmp_path / "old.mp3"
+    new = tmp_path / "new.mp3"
+    old.write_bytes(b"x")
+    new.write_bytes(b"x")
+    two_hours_ago = time.time() - 7200
+    os.utime(old, (two_hours_ago, two_hours_ago))
+
+    assert tts_utils.sweep_stale_tts_files(max_age_seconds=3600) == 1
+    assert not old.exists() and new.exists()
+
+
+def test_gTTS_실패시_빈_임시파일을_남기지_않는다(tmp_path, monkeypatch):
+    import pytest
+    import utils.tts_utils as tts_utils
+
+    monkeypatch.setattr(tts_utils, "TTS_TEMP_DIR", tmp_path)
+
+    class BrokenTTS:
+        def __init__(self, **kwargs):
+            pass
+
+        def save(self, path):
+            raise RuntimeError("network down")
+
+    monkeypatch.setattr(tts_utils, "gTTS", BrokenTTS)
+    with pytest.raises(RuntimeError):
+        tts_utils.text_to_speech("안녕")
+    assert list(tmp_path.iterdir()) == []

@@ -98,9 +98,26 @@ async def create_tables():
                     duration INT NOT NULL,
                     played_at DATETIME NOT NULL,
                     INDEX idx_guild_id (guild_id),
-                    INDEX idx_played_at (played_at)
+                    INDEX idx_played_at (played_at),
+                    INDEX idx_guild_played (guild_id, played_at)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """)
+
+            # 기존 테이블에는 CREATE TABLE IF NOT EXISTS 로 인덱스가 추가되지 않으므로 따로 보강한다.
+            # 히스토리 조회·100개 초과분 정리가 모두 "WHERE guild_id ORDER BY played_at" 이라
+            # 복합 인덱스가 있어야 정렬(filesort) 없이 처리된다.
+            await cur.execute("""
+                SELECT COUNT(*) FROM information_schema.statistics
+                WHERE table_schema = DATABASE()
+                  AND table_name = 'music_history'
+                  AND index_name = 'idx_guild_played'
+            """)
+            (has_index,) = await cur.fetchone()
+            if not has_index:
+                await cur.execute(
+                    "ALTER TABLE music_history ADD INDEX idx_guild_played (guild_id, played_at)"
+                )
+                logger.info("music_history 에 (guild_id, played_at) 복합 인덱스를 추가했습니다.")
             
             # 플레이리스트 테이블
             await cur.execute("""
@@ -255,6 +272,23 @@ async def add_history_item_to_db(guild_id: int, title: str, url: str, duration: 
                 await conn.commit()
     except Exception as e:
         logger.error(f"히스토리 항목 추가 중 오류: {e}")
+
+
+async def clear_guild_history_in_db(guild_id: int):
+    """특정 길드의 히스토리만 삭제합니다. (전체 테이블을 다시 쓰지 않는다)"""
+    if not USE_MYSQL:
+        return
+
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "DELETE FROM music_history WHERE guild_id = %s",
+                    (guild_id,)
+                )
+    except Exception as e:
+        logger.error(f"히스토리 삭제 중 오류: {e}")
 
 
 async def get_history_from_db(guild_id: int, limit: int = 100) -> List[Dict[str, Any]]:

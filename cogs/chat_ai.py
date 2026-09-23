@@ -185,6 +185,8 @@ class _ChatSession:
     last_active: float = field(default_factory=time.monotonic)
     # 같은 세션의 응답 생성을 직렬화해 답변 순서·히스토리 순서를 보장한다.
     lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    # 백그라운드 요약이 진행 중이면 중복 요약을 시작하지 않는다.
+    compacting: bool = False
 
     tts_lang: str = "ko"
     tts_voice_model: str = "기본"
@@ -222,6 +224,8 @@ class ChatAI(commands.Cog):
         self._switch_notice: Optional[str] = None
         self._sessions: Dict[SessionKey, _ChatSession] = {}
         self._cleanup_task: Optional[asyncio.Task] = None
+        # 백그라운드 요약 태스크 (GC 로 사라지지 않도록 참조를 유지하고, 언로드 시 취소)
+        self._background_tasks: set = set()
         # 세이브 파일 읽기 캐시: 이름 -> (적재 시각, 데이터)
         self._saves_cache: Dict[str, Tuple[float, dict]] = {}
 
@@ -342,17 +346,43 @@ class ChatAI(commands.Cog):
 
         return installed_models[0]
 
+    @staticmethod
+    def _attach_turn_context(
+        messages: List[Dict[str, str]],
+        turn_context: str,
+    ) -> List[Dict[str, str]]:
+        """이번 턴에만 쓰는 참고 자료를 마지막 사용자 메시지 앞에 붙인다.
+
+        system 프롬프트는 요청마다 같게 유지해야 Ollama 가 system·히스토리 구간의
+        프롬프트 캐시(KV)를 재사용한다. 매번 달라지는 자료(TRPG·지식·웹검색)를 system 에
+        넣으면 캐시가 첫 토큰부터 무효화되어 히스토리 전체를 다시 처리하게 된다.
+        """
+        result = list(messages)
+        if turn_context and result and result[-1].get("role") == "user":
+            last = result[-1]
+            result[-1] = {
+                **last,
+                "content": (
+                    f"{turn_context}\n\n"
+                    "[위 참고 자료는 시스템이 첨부한 것입니다. 아래가 실제 사용자 메시지입니다]\n"
+                    f"{last['content']}"
+                ),
+            }
+        return result
+
     def _request_chat_once(
         self,
         model_name: str,
         messages: List[Dict[str, str]],
         extra_system: str = "",
+        turn_context: str = "",
     ) -> str:
         endpoint = f"{LOCAL_AI_BASE_URL.rstrip('/')}/api/chat"
         system_content = SYSTEM_PROMPT if not extra_system else f"{SYSTEM_PROMPT}\n\n{extra_system}"
         payload = {
             "model": model_name,
-            "messages": [{"role": "system", "content": system_content}] + list(messages),
+            "messages": [{"role": "system", "content": system_content}]
+            + self._attach_turn_context(messages, turn_context),
             "stream": False,
             # 유휴 후 모델이 메모리에서 내려가 첫 응답이 느려지는 것을 방지
             "keep_alive": LOCAL_AI_KEEP_ALIVE,
@@ -376,9 +406,12 @@ class ChatAI(commands.Cog):
         model_name: str,
         messages: List[Dict[str, str]],
         extra_system: str = "",
+        turn_context: str = "",
     ) -> str:
         """한국어 전용 응답 보장: 비-한국어 외래 문자 발견 시 1회 재시도 후 silent cleanup."""
-        reply = self._request_chat_once(model_name, messages, extra_system=extra_system)
+        reply = self._request_chat_once(
+            model_name, messages, extra_system=extra_system, turn_context=turn_context
+        )
         if not contains_non_korean(reply):
             return reply
 
@@ -394,7 +427,9 @@ class ChatAI(commands.Cog):
             "한 글자라도 비-한국어 외래 문자가 들어가면 안 됩니다."
         )
         combined_system = f"{extra_system}\n\n{retry_directive}" if extra_system else retry_directive
-        retried = self._request_chat_once(model_name, messages, extra_system=combined_system)
+        retried = self._request_chat_once(
+            model_name, messages, extra_system=combined_system, turn_context=turn_context
+        )
         if not contains_non_korean(retried):
             return retried
 
@@ -419,19 +454,22 @@ class ChatAI(commands.Cog):
             {"role": "user", "content": f"({username}) {prompt}"}
         ]
 
-        context_blocks: List[str] = []
+        # 요약은 히스토리 압축 때만 바뀌므로 system 에 둬도 프롬프트 캐시를 깨지 않는다.
+        # 매 메시지마다 달라지는 참고 자료는 마지막 사용자 메시지 쪽(turn_context)으로 보낸다.
+        extra_system = ""
         if summary:
-            context_blocks.append(
+            extra_system = (
                 "[지난 대화 요약]\n"
                 f"{summary}\n"
                 "위 요약은 이 대화에서 히스토리에 없는 이전 내용의 기억입니다. "
                 "필요할 때 자연스럽게 참고하되, 요약문을 그대로 인용하지 마세요."
             )
-        context_blocks.extend(block for block in (extra_contexts or []) if block)
-        extra_system = "\n\n".join(context_blocks)
+        turn_context = "\n\n".join(block for block in (extra_contexts or []) if block)
 
         try:
-            return self._request_chat_korean(self.active_model, messages, extra_system=extra_system)
+            return self._request_chat_korean(
+                self.active_model, messages, extra_system=extra_system, turn_context=turn_context
+            )
         except FileNotFoundError:
             installed_models = self._fetch_installed_models_sync()
             fallback_model = self._pick_fallback_model(installed_models, self.active_model)
@@ -446,7 +484,9 @@ class ChatAI(commands.Cog):
                 f"설정 모델 `{old_model}`을 찾지 못해서, 설치된 모델 `{fallback_model}`로 자동 전환했어요."
             )
             logger.warning(f"로컬 AI 모델 자동 전환: {old_model} -> {fallback_model}")
-            return self._request_chat_korean(self.active_model, messages, extra_system=extra_system)
+            return self._request_chat_korean(
+                self.active_model, messages, extra_system=extra_system, turn_context=turn_context
+            )
 
     async def _generate_ai_reply(
         self,
@@ -877,26 +917,48 @@ class ChatAI(commands.Cog):
         return text[:SESSION_SUMMARY_MAX_CHARS * 2]
 
     async def _maybe_compact_history(self, session: _ChatSession) -> None:
-        """히스토리가 임계치를 넘으면 오래된 부분을 요약으로 압축한다.
+        """히스토리가 임계치를 넘으면 오래된 부분의 요약 압축을 백그라운드로 시작한다.
 
-        답변 전송 후(세션 락 보유 상태)에 호출되므로 사용자 응답 지연에는 영향이 없고,
+        요약도 LLM 호출이라 수 초가 걸린다. 세션 락을 쥔 채 기다리면 그동안 같은
+        사용자의 다음 메시지가 막히므로, 락 밖의 태스크에서 요약하고 끝나면 반영한다.
         요약 실패 시에는 _truncate 의 안전 상한이 무한 증가를 막는다.
         """
-        if len(session.history) <= SESSION_COMPACT_TRIGGER:
+        if session.compacting or len(session.history) <= SESSION_COMPACT_TRIGGER:
             return
 
         keep_msgs = SESSION_HISTORY_MAX_TURNS * 2
         overflow = session.history[:-keep_msgs]
+        session.compacting = True
+        task = asyncio.create_task(
+            self._compact_in_background(session, session.summary, overflow)
+        )
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _compact_in_background(
+        self,
+        session: _ChatSession,
+        old_summary: str,
+        overflow: List[Dict[str, str]],
+    ) -> None:
         try:
-            new_summary = await run_llm(
-                self._summarize_sync, session.summary, overflow
-            )
+            new_summary = await run_llm(self._summarize_sync, old_summary, overflow)
         except Exception as e:
             logger.warning(f"대화 요약 생성 실패(다음 기회에 재시도): {e}")
             return
+        finally:
+            session.compacting = False
 
+        # 요약하는 동안 새 메시지가 붙었거나 안전 상한으로 앞부분이 잘렸을 수 있다.
+        # 요약에 포함된 메시지(객체 동일성)만 앞에서부터 걷어내 새 메시지는 보존한다.
+        summarized = {id(m) for m in overflow}
+        drop = 0
+        for message in session.history:
+            if id(message) not in summarized:
+                break
+            drop += 1
         session.summary = new_summary
-        session.history = session.history[-keep_msgs:]
+        session.history = session.history[drop:]
         logger.debug(
             f"대화 히스토리 압축: {len(overflow)}개 메시지 -> 요약 {len(new_summary)}자"
         )
@@ -1387,4 +1449,7 @@ class ChatAI(commands.Cog):
             except asyncio.CancelledError:
                 pass
         self._cleanup_task = None
+        for task in list(self._background_tasks):
+            task.cancel()
+        self._background_tasks.clear()
         self._sessions.clear()

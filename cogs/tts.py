@@ -2,13 +2,15 @@
 import asyncio
 import logging
 import re
+from typing import Optional
 import discord
 from discord.ext import commands
 from pathlib import Path
-from utils.tts_utils import text_to_speech, cleanup_tts_file, VOICE_MODELS
+from utils.tts_utils import text_to_speech, cleanup_tts_file, sweep_stale_tts_files, VOICE_MODELS
 from utils.file_utils import load_tts_settings, save_tts_settings
 from utils.config import COMMAND_MESSAGE_DELETE_DELAY, FFMPEG_PATH
 from utils.discord_utils import safe_defer, safe_typing
+from core.audio_mixer import play_overlay, release_held_main
 from utils.rvc_utils import (
     _check_rvc_available, add_rvc_model, remove_rvc_model,
     get_all_rvc_models, get_rvc_model, text_to_speech_with_rvc_async,
@@ -22,6 +24,8 @@ from utils.supertonic_utils import (
 
 logger = logging.getLogger(__name__)
 TTS_QUEUE_MAX = 20
+# 재생이 끝난 TTS 임시 파일을 지우기까지 기다리는 시간(초). FFmpeg 가 파일을 놓을 때까지의 여유.
+TTS_FILE_DELETE_DELAY = 2.0
 
 # TTS 읽기 전처리용 정규식
 _URL_RE = re.compile(r'https?://\S+')
@@ -47,6 +51,10 @@ class TTS(commands.Cog):
         # (참조를 들고 있지 않으면 태스크가 GC 될 수 있다)
         self._settings_write_lock = asyncio.Lock()
         self._settings_save_tasks: set = set()
+        # 재생 중 다음 메시지 미리 합성: guild_id -> (대기열 항목, 합성 태스크)
+        self._presynth = {}
+        # 대기열 처리 태스크 참조 보관 (GC 방지)
+        self._queue_tasks: set = set()
 
     def _get_playback_lock(self, guild_id: int) -> asyncio.Lock:
         if guild_id not in self._playback_locks:
@@ -68,7 +76,13 @@ class TTS(commands.Cog):
         self.tts_queue[guild.id].append((user_id, text, settings))
         async with self._get_playback_lock(guild.id):
             if not self.playing.get(guild.id, False):
-                asyncio.create_task(self._process_queue(guild))
+                task = asyncio.create_task(self._process_queue(guild))
+                # 참조를 들고 있지 않으면 태스크가 GC 로 사라질 수 있다.
+                self._queue_tasks.add(task)
+                task.add_done_callback(self._queue_tasks.discard)
+            else:
+                # 재생 중에 들어온 메시지는 지금 합성을 시작해 두면 차례가 왔을 때 바로 읽는다.
+                self._start_presynthesis(guild.id)
         return True
 
     def _get_voice_connect_lock(self, guild_id: int) -> asyncio.Lock:
@@ -163,14 +177,78 @@ class TTS(commands.Cog):
         return text.strip()
 
 
-    async def play_tts(self, ctx, text: str, lang: str = 'ko', voice_model: str = '기본', slow: bool = False, use_rvc: bool = False, rvc_model: str = None, use_supertonic: bool = False, supertonic_voice: str = 'default'):
-        """TTS를 재생합니다."""
-        tts_file = None
-        # 예외 핸들러에서 참조되므로 TTS 생성 전에 미리 초기화 (UnboundLocalError 방지)
-        music_player = None
-        volume_lowered = False
-        music_was_playing = False
-        music_was_paused = False
+    async def _synthesize_tts(self, text: str, lang: str = 'ko', voice_model: str = '기본', slow: bool = False, use_rvc: bool = False, rvc_model: str = None, use_supertonic: bool = False, supertonic_voice: str = 'default') -> Path:
+        """설정에 맞는 엔진으로 음성 파일을 만듭니다. (Supertonic → RVC → gTTS 순으로 폴백)
+
+        재생과 분리해 두어, 앞 메시지가 재생되는 동안 다음 메시지를 미리 합성할 수 있다.
+        모든 엔진이 실패하면 예외를 던진다.
+        """
+        loop = asyncio.get_running_loop()
+
+        # Supertonic 사용 (가장 빠른 TTS, 31개 언어 지원)
+        if use_supertonic:
+            if check_supertonic_available():
+                try:
+                    # 모델 자산이 없으면 라이브러리가 자동 다운로드 (첫 실행 시 ~305MB).
+                    # lang 도 함께 전달해 한국어 등 다국어 합성 지원.
+                    tts_file = await loop.run_in_executor(
+                        None,
+                        lambda: text_to_speech_supertonic(
+                            text,
+                            voice_preset=supertonic_voice,
+                            lang=lang,
+                        ),
+                    )
+                    logger.info(
+                        f"Supertonic TTS 파일 생성 완료: voice={supertonic_voice}, lang={lang}"
+                    )
+                    return tts_file
+                except Exception as e:
+                    logger.error(f"Supertonic TTS 생성 실패: {e}, gTTS로 폴백합니다.")
+            else:
+                logger.warning(
+                    "Supertonic 라이브러리가 설치되지 않았습니다. `pip install supertonic` 로 설치하세요. gTTS로 폴백합니다."
+                )
+
+        # RVC 사용 (TTS + RVC 결합). Supertonic 이 성공했으면 위에서 반환해 여기까지 오지 않는다
+        # (예전에는 둘 다 켜져 있으면 두 번 합성하고 앞 파일을 지우지 않았다).
+        if use_rvc:
+            if _check_rvc_available():
+                if rvc_model is None:
+                    rvc_models = get_all_rvc_models()
+                    if rvc_models:
+                        rvc_model = list(rvc_models.keys())[0]
+                    else:
+                        logger.warning("등록된 RVC 모델이 없습니다. gTTS로 폴백합니다.")
+
+                if rvc_model:
+                    try:
+                        tts_file = await text_to_speech_with_rvc_async(text, rvc_model, pitch=0, speed=1.0, lang=lang)
+                        logger.info(f"RVC TTS 파일 생성 완료: {rvc_model}")
+                        return tts_file
+                    except Exception as e:
+                        logger.error(f"RVC TTS 생성 실패: {e}, gTTS로 폴백합니다.")
+            else:
+                logger.warning("RVC를 사용할 수 없습니다. pip install tts-with-rvc-onnx 또는 pip install tts-with-rvc로 설치하세요. gTTS로 폴백합니다.")
+
+        # Supertonic 과 RVC 를 쓰지 않거나 실패한 경우 gTTS 사용
+        tld = 'com'  # 기본값
+        if lang in VOICE_MODELS and voice_model in VOICE_MODELS[lang]:
+            tld = VOICE_MODELS[lang][voice_model]['tld']
+
+        # TTS 파일 생성 (동기 함수이므로 스레드에서 실행)
+        return await loop.run_in_executor(
+            None,
+            lambda: text_to_speech(text, lang=lang, slow=slow, tld=tld)
+        )
+
+    async def play_tts(self, ctx, text: str, lang: str = 'ko', voice_model: str = '기본', slow: bool = False, use_rvc: bool = False, rvc_model: str = None, use_supertonic: bool = False, supertonic_voice: str = 'default', pre_synthesized: Path = None):
+        """TTS를 재생합니다.
+
+        pre_synthesized 가 주어지면 합성을 건너뛰고 그 파일을 재생한다. 재생을 시작하지 못하면
+        (조기 반환 포함) 아래 finally 에서 파일을 정리한다.
+        """
+        tts_file = pre_synthesized
         playback_started = False
         try:
             # 텍스트 유효성 검사
@@ -189,68 +267,9 @@ class TTS(commands.Cog):
                 logger.error("voice_client가 없습니다. 음성 채널에 연결되어 있지 않습니다.")
                 return False
             
-            # Supertonic 사용 (가장 빠른 TTS, 31개 언어 지원)
-            if use_supertonic:
-                if check_supertonic_available():
-                    try:
-                        import asyncio
-                        loop = asyncio.get_event_loop()
-                        # 모델 자산이 없으면 라이브러리가 자동 다운로드 (첫 실행 시 ~305MB).
-                        # lang 도 함께 전달해 한국어 등 다국어 합성 지원.
-                        tts_file = await loop.run_in_executor(
-                            None,
-                            lambda: text_to_speech_supertonic(
-                                text,
-                                voice_preset=supertonic_voice,
-                                lang=lang,
-                            ),
-                        )
-                        logger.info(
-                            f"Supertonic TTS 파일 생성 완료: voice={supertonic_voice}, lang={lang}"
-                        )
-                    except Exception as e:
-                        logger.error(f"Supertonic TTS 생성 실패: {e}, gTTS로 폴백합니다.")
-                        use_supertonic = False
-                else:
-                    logger.warning(
-                        "Supertonic 라이브러리가 설치되지 않았습니다. `pip install supertonic` 로 설치하세요. gTTS로 폴백합니다."
-                    )
-                    use_supertonic = False
-            
-            # RVC 사용 (TTS + RVC 결합)
-            if use_rvc:
-                if _check_rvc_available():
-                    if rvc_model is None:
-                        rvc_models = get_all_rvc_models()
-                        if rvc_models:
-                            rvc_model = list(rvc_models.keys())[0]
-                        else:
-                            logger.warning("등록된 RVC 모델이 없습니다. gTTS로 폴백합니다.")
-                            use_rvc = False
-                    
-                    if use_rvc and rvc_model:
-                        try:
-                            tts_file = await text_to_speech_with_rvc_async(text, rvc_model, pitch=0, speed=1.0, lang=lang)
-                            logger.info(f"RVC TTS 파일 생성 완료: {rvc_model}")
-                        except Exception as e:
-                            logger.error(f"RVC TTS 생성 실패: {e}, gTTS로 폴백합니다.")
-                            use_rvc = False
-                else:
-                    logger.warning("RVC를 사용할 수 없습니다. pip install tts-with-rvc-onnx 또는 pip install tts-with-rvc로 설치하세요. gTTS로 폴백합니다.")
-                    use_rvc = False
-            
-            # Supertonic과 RVC를 사용하지 않는 경우 gTTS 사용
-            if not use_supertonic and not use_rvc:
-                tld = 'com'  # 기본값
-                if lang in VOICE_MODELS and voice_model in VOICE_MODELS[lang]:
-                    tld = VOICE_MODELS[lang][voice_model]['tld']
-                
-                # TTS 파일 생성 (동기 함수이므로 비동기 루프에서 실행)
-                import asyncio
-                loop = asyncio.get_event_loop()
-                tts_file = await loop.run_in_executor(
-                    None,
-                    lambda: text_to_speech(text, lang=lang, slow=slow, tld=tld)
+            if tts_file is None:
+                tts_file = await self._synthesize_tts(
+                    text, lang, voice_model, slow, use_rvc, rvc_model, use_supertonic, supertonic_voice
                 )
             
             # FFmpeg / 파일 검증 — 음악 pause 전에 수행해 실패 시 음악이 멈춘 채 남지 않게 한다.
@@ -277,104 +296,47 @@ class TTS(commands.Cog):
 
             logger.debug(f"TTS 파일 재생 준비: {tts_file} (크기: {file_size} bytes)")
 
-            # 음악 재생 중이면 FFmpeg를 정리하고 위치만 보존 (pause+play 교체 누수 방지)
-            music_cog = self.bot.get_cog('Music')
-            if music_cog and ctx.voice_client:
-                guild_id = ctx.guild.id if hasattr(ctx, 'guild') else None
-                if guild_id and guild_id in music_cog.players:
-                    music_player = music_cog.players[guild_id]
-                    if music_player.suspend_for_tts():
-                        music_was_playing = True
-                        music_was_paused = True
-                        logger.debug(
-                            f"음악 suspend_for_tts 완료 (위치: {music_player.paused_at_position:.2f}초)"
-                        )
-
-            options = '-vn'
-
-            source = discord.FFmpegPCMAudio(
-                str(tts_file),
-                executable=ffmpeg_executable,
-                options=options
+            source = discord.PCMVolumeTransformer(
+                discord.FFmpegPCMAudio(str(tts_file), executable=ffmpeg_executable, options='-vn'),
+                volume=1.0,
             )
 
-            source = discord.PCMVolumeTransformer(source, volume=1.0)
-
             def after_play(error):
-                """재생 완료 후 콜백"""
-                import asyncio
+                """재생 완료 후 콜백 (믹서가 오디오 스레드에서 부를 수 있다)"""
                 if error:
                     logger.error(f"TTS 재생 오류: {error}")
-                    if tts_file:
-                        cleanup_tts_file(tts_file)
-                    asyncio.run_coroutine_threadsafe(
-                        self._handle_playback_error(ctx, music_player, volume_lowered, music_was_playing, music_was_paused),
-                        self.bot.loop
-                    )
                 else:
                     logger.debug(f"TTS 재생 완료: {tts_file}")
-                    asyncio.run_coroutine_threadsafe(
-                        self._cleanup_after_play(tts_file, ctx, music_player, volume_lowered, music_was_playing, music_was_paused),
-                        self.bot.loop
-                    )
+                asyncio.run_coroutine_threadsafe(self._cleanup_after_play(tts_file, ctx), self.bot.loop)
 
+            # 음악이 재생 중이면 음악을 멈추지 않고 그 위에 겹쳐 읽는다 (음악은 잠시 작아진다).
+            # 음악이 일시정지 상태면 음악은 그 자리에 둔 채 TTS 만 나오고, 다 읽으면 다시 멈춘다.
             logger.info(f"TTS 재생 시작: {tts_file.name}")
-            ctx.voice_client.play(source, after=after_play)
+            await play_overlay(ctx.voice_client, source, after=after_play)
             playback_started = True
             return True
         except Exception as e:
             logger.error(f"TTS 재생 오류: {e}", exc_info=True)
             return False
         finally:
-            if music_was_paused and not playback_started and music_player and ctx.voice_client:
-                try:
-                    await self._restore_music_after_tts(
-                        ctx, music_player, volume_lowered, music_was_playing, music_was_paused
-                    )
-                except Exception as restore_err:
-                    logger.error(f"TTS 실패 후 음악 복원 오류: {restore_err}", exc_info=True)
             if tts_file and not playback_started:
                 cleanup_tts_file(tts_file)
-    
-    async def _restore_music_after_tts(self, ctx, music_player=None, volume_lowered=False, music_was_playing=False, music_was_paused=False):
-        """TTS 재생 후 음악 복원 헬퍼 함수"""
-        try:
-            # 음악 재생 재개
-            if music_was_playing and ctx.voice_client:
-                if music_player:
-                    # TTS 재생으로 source가 바뀌었으므로 음악을 다시 재생
-                    success = await music_player.resume_after_tts()
-                    if success:
-                        logger.debug("음악 재생 재개 완료")
-                    else:
-                        logger.warning("음악 재생 재개 실패")
-                else:
-                    # music_player가 없으면 Music cog에서 가져오기
-                    music_cog = self.bot.get_cog('Music')
-                    if music_cog:
-                        guild_id = ctx.guild.id if hasattr(ctx, 'guild') else None
-                        if guild_id and guild_id in music_cog.players:
-                            music_player = music_cog.players[guild_id]
-                            success = await music_player.resume_after_tts()
-                            if success:
-                                logger.debug("음악 재생 재개 완료")
-                            else:
-                                logger.warning("음악 재생 재개 실패")
-        except Exception as e:
-            logger.error(f"음악 복원 중 오류: {e}", exc_info=True)
 
-    async def _handle_playback_error(self, ctx, music_player=None, volume_lowered=False, music_was_playing=False, music_was_paused=False):
-        """재생 오류 발생 시 처리"""
-        # 음악 재개
-        if music_was_playing and music_player and ctx.voice_client:
-            await self._restore_music_after_tts(ctx, music_player, volume_lowered, music_was_playing, music_was_paused)
-        
-        # 재생 플래그 해제
-        self.playing[ctx.guild.id] = False
-        
-        # 대기열 처리 (다음 항목 재생 시도)
-        if ctx.guild.id in self.tts_queue and self.tts_queue[ctx.guild.id]:
+    async def _after_tts_finished(self, ctx):
+        """TTS 한 건이 끝난 뒤: 대기열이 남아 있으면 이어서 읽고, 다 읽었으면 음악 홀드를 푼다."""
+        guild_id = ctx.guild.id
+        self.playing[guild_id] = False
+
+        if self.tts_queue.get(guild_id):
             await self._process_queue(ctx.guild)
+            if self.playing.get(guild_id):
+                return
+
+        # 일시정지 상태였던 음악 위에 TTS 를 읽었다면 다시 일시정지 상태로 되돌린다.
+        try:
+            release_held_main(ctx.guild.voice_client)
+        except Exception as e:
+            logger.debug(f"음악 홀드 해제 중 오류 (무시됨): {e}")
 
     async def delete_command_message(self, ctx):
         """명령어 메시지를 삭제합니다."""
@@ -466,21 +428,74 @@ class TTS(commands.Cog):
             await self.delete_command_message(ctx)
             return False
 
-    async def _cleanup_after_play(self, file_path: Path, ctx, music_player=None, volume_lowered=False, music_was_playing=False, music_was_paused=False):
+    async def _cleanup_after_play(self, file_path: Path, ctx):
         """재생 후 파일 정리 및 대기열 처리"""
-        await asyncio.sleep(1)  # 재생 완료 대기
-        cleanup_tts_file(file_path)
-        
-        # 음악 재개
-        if music_was_playing and music_player and ctx.voice_client:
-            await self._restore_music_after_tts(ctx, music_player, volume_lowered, music_was_playing, music_was_paused)
-        
-        # 재생 플래그 해제
-        self.playing[ctx.guild.id] = False
-        
-        # 대기열 처리 (재생 완료 후 다음 항목 재생)
-        if ctx.guild.id in self.tts_queue and self.tts_queue[ctx.guild.id]:
-            await self._process_queue(ctx.guild)
+        # 파일은 잠시 뒤에 지우고(FFmpeg 가 파일을 놓을 여유), 다음 메시지는 바로 이어서 읽는다.
+        # (예전에는 여기서 1초를 기다려 메시지 사이마다 1초씩 공백이 생겼다)
+        asyncio.get_running_loop().call_later(TTS_FILE_DELETE_DELAY, cleanup_tts_file, file_path)
+        await self._after_tts_finished(ctx)
+
+    @staticmethod
+    def _synthesis_args(text: str, settings: dict) -> tuple:
+        """대기열 항목 설정을 _synthesize_tts / play_tts 인자 순서로 변환합니다."""
+        return (
+            text,
+            settings.get('lang', 'ko'),
+            settings.get('voice_model', '기본'),
+            settings.get('slow', False),
+            settings.get('use_rvc', False),
+            settings.get('rvc_model', None),
+            settings.get('use_supertonic', False),
+            settings.get('supertonic_voice', 'default'),
+        )
+
+    def _start_presynthesis(self, guild_id: int) -> None:
+        """재생 중에 대기열 맨 앞 메시지를 미리 합성해 둡니다. (메시지 사이 공백 제거)"""
+        queue = self.tts_queue.get(guild_id)
+        if not queue:
+            return
+        item = queue[0]
+        current = self._presynth.get(guild_id)
+        if current is not None and current[0] is item:
+            return
+        self._discard_presynth(guild_id)
+
+        _, text, settings = item
+        text = (text or '').strip()
+        if not text or len(text) > 200:
+            return
+        task = asyncio.create_task(self._synthesize_tts(*self._synthesis_args(text, settings)))
+        self._presynth[guild_id] = (item, task)
+
+    def _discard_presynth(self, guild_id: int) -> None:
+        """쓰지 않게 된 미리 합성 결과를 버리고, 만들어진(또는 만들어질) 파일을 지웁니다."""
+        entry = self._presynth.pop(guild_id, None)
+        if entry is None:
+            return
+        task = entry[1]
+
+        def _cleanup(t):
+            # 합성은 스레드에서 끝까지 진행되므로 취소 대신 완료 후 파일을 정리한다.
+            if not t.cancelled() and t.exception() is None and t.result():
+                cleanup_tts_file(t.result())
+
+        if task.done():
+            _cleanup(task)
+        else:
+            task.add_done_callback(_cleanup)
+
+    async def _take_presynth(self, guild_id: int, item) -> Optional[Path]:
+        """이 대기열 항목을 미리 합성해 둔 파일이 있으면 반환합니다. 실패했으면 None."""
+        entry = self._presynth.get(guild_id)
+        if entry is None or entry[0] is not item:
+            return None
+        self._presynth.pop(guild_id, None)
+        try:
+            return await entry[1]
+        except Exception as e:
+            # 재생 시점에 폴백을 포함해 다시 합성한다.
+            logger.debug(f"미리 합성 실패, 다시 합성합니다: {e}")
+            return None
 
     async def _process_queue(self, guild):
         """TTS 대기열을 처리합니다."""
@@ -492,6 +507,7 @@ class TTS(commands.Cog):
             if not guild.voice_client:
                 self.tts_queue[guild.id] = []
                 self.playing[guild.id] = False
+                self._discard_presynth(guild.id)
                 return
 
             if guild.id not in self.tts_queue or not self.tts_queue[guild.id]:
@@ -499,7 +515,8 @@ class TTS(commands.Cog):
                 return
 
             while self.tts_queue[guild.id]:
-                user_id, text, settings = self.tts_queue[guild.id].pop(0)
+                item = self.tts_queue[guild.id].pop(0)
+                user_id, text, settings = item
 
                 if not text or not text.strip() or len(text.strip()) > 200:
                     logger.debug(f"유효하지 않은 텍스트 건너뛰기: '{text[:50]}...'")
@@ -514,19 +531,16 @@ class TTS(commands.Cog):
                         self.bot = bot
 
                 temp_ctx = TempContext(guild, guild.voice_client, self.bot)
+                pre_synthesized = await self._take_presynth(guild.id, item)
                 success = await self.play_tts(
                     temp_ctx,
-                    text.strip(),
-                    settings.get('lang', 'ko'),
-                    settings.get('voice_model', '기본'),
-                    settings.get('slow', False),
-                    settings.get('use_rvc', False),
-                    settings.get('rvc_model', None),
-                    settings.get('use_supertonic', False),
-                    settings.get('supertonic_voice', 'default')
+                    *self._synthesis_args(text.strip(), settings),
+                    pre_synthesized=pre_synthesized,
                 )
 
                 if success:
+                    # 이 메시지가 재생되는 동안 다음 메시지를 미리 합성한다.
+                    self._start_presynthesis(guild.id)
                     return
 
                 self.playing[guild.id] = False
@@ -537,6 +551,7 @@ class TTS(commands.Cog):
     @commands.Cog.listener()
     async def on_guild_remove(self, guild):
         """봇이 길드에서 나가면 그 길드용 상태를 정리합니다 (길드별 딕셔너리 누적 방지)."""
+        self._discard_presynth(guild.id)
         for store in (
             self._playback_locks, self._voice_connect_locks,
             self.tts_queue, self.playing, self.active_users,
@@ -1384,6 +1399,12 @@ class TTS(commands.Cog):
     
     async def cog_load(self):
         """Cog가 로드될 때 Slash Commands 등록 및 자동 모델 스캔"""
+        # 이전 실행에서 남은 TTS 임시 파일 정리 (실패해도 로드를 막지 않는다)
+        try:
+            await asyncio.to_thread(sweep_stale_tts_files)
+        except Exception as e:
+            logger.debug(f"TTS 임시 파일 정리 실패 (무시됨): {e}")
+
         # TTS 그룹 생성
         self.tts_group = discord.app_commands.Group(name="tts", description="TTS (Text-to-Speech) 관련 명령어")
         
@@ -1411,3 +1432,6 @@ class TTS(commands.Cog):
                 self.bot.tree.remove_command(self.tts_group.name)
         except Exception as e:
             logger.error(f"Slash Commands 제거 중 오류: {e}")
+        # 미리 합성해 둔 임시 파일이 남지 않도록 정리한다.
+        for guild_id in list(self._presynth):
+            self._discard_presynth(guild_id)

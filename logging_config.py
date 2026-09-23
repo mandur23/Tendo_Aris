@@ -1,7 +1,7 @@
 import logging
 import logging.handlers
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
 
 class DateRotatingFileHandler(logging.FileHandler):
@@ -18,7 +18,8 @@ class DateRotatingFileHandler(logging.FileHandler):
         _, file_path, date_str = self._get_date_folder_and_file()
         self.current_date = date_str
         self.current_file = file_path
-        
+        self._next_rollover_at = self._compute_next_rollover()
+
         # 부모 클래스 초기화 (첫 파일로)
         # line buffering으로 설정하여 실시간 저장
         logging.FileHandler.__init__(self, str(file_path), mode='a', encoding=encoding)
@@ -72,14 +73,25 @@ class DateRotatingFileHandler(logging.FileHandler):
                     except (ValueError, AttributeError):
                         pass
     
+    @staticmethod
+    def _compute_next_rollover() -> float:
+        """다음 자정의 타임스탬프를 반환"""
+        tomorrow = (datetime.now() + timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        return tomorrow.timestamp()
+
     def shouldRollover(self, record):
-        """날짜가 바뀌었는지 확인"""
-        _, _, date_str = self._get_date_folder_and_file()
-        return self.current_date != date_str
-    
+        """날짜가 바뀌었는지 확인
+
+        로그 한 줄마다 호출되므로 폴더 생성·날짜 포맷 없이 자정 시각과만 비교한다.
+        """
+        return record.created >= self._next_rollover_at
+
     def doRollover(self):
         """날짜가 바뀌면 새 파일로 전환"""
         self._update_file_path()
+        self._next_rollover_at = self._compute_next_rollover()
     
     def emit(self, record):
         """로그 레코드를 파일에 기록 (실시간 저장)"""

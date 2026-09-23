@@ -44,6 +44,7 @@ MARKET_LABELS = {"kospi": "코스피", "kosdaq": "코스닥", "konex": "코넥�
 _CACHE_TTL_SECONDS = 300
 _cache: dict[tuple, tuple[float, list[dict]]] = {}
 _locks: dict[tuple, asyncio.Lock] = {}
+_CACHE_PRUNE_THRESHOLD = 64
 
 
 class KrxApiError(RuntimeError):
@@ -145,7 +146,19 @@ async def get_daily_trade(market: str = "kospi", bas_dd: Optional[str] = None) -
             return hit[1]
         rows = await _request(ENDPOINTS[f"{m}_daily"], {"basDd": day})
         _cache[key] = (time.monotonic(), rows)
+        _prune_cache()
         return rows
+
+
+def _prune_cache() -> None:
+    """만료된 캐시와, 쓰이지 않는 락을 정리한다. (날짜별 조회가 계속 쌓이는 것 방지)"""
+    if len(_cache) <= _CACHE_PRUNE_THRESHOLD and len(_locks) <= _CACHE_PRUNE_THRESHOLD:
+        return
+    now = time.monotonic()
+    for k in [k for k, (stamp, _) in _cache.items() if now - stamp >= _CACHE_TTL_SECONDS]:
+        _cache.pop(k, None)
+    for k in [k for k, lock in _locks.items() if not lock.locked() and k not in _cache]:
+        _locks.pop(k, None)
 
 
 async def get_latest_daily_trade(

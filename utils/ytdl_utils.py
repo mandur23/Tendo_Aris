@@ -1,4 +1,5 @@
 import os
+import time
 import yt_dlp
 import random
 from utils.config import FFMPEG_PATH
@@ -81,8 +82,10 @@ def create_ytdl_instance(custom_options=None):
         'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     ]
     
-    options['http_headers']['User-Agent'] = random.choice(user_agents)
-    
+    # .copy() 는 얕은 복사라 http_headers 는 전역 dict 를 공유한다.
+    # 여러 스레드가 동시에 인스턴스를 만들 때 서로의 User-Agent 를 덮어쓰지 않도록 복사한다.
+    options['http_headers'] = {**options['http_headers'], 'User-Agent': random.choice(user_agents)}
+
     return yt_dlp.YoutubeDL(options)
 
 
@@ -96,3 +99,34 @@ def flatten_ytdl_info(info):
                 return entry
         return None
     return info
+
+
+# 추출한 스트림 URL 을 재사용할 수 있는 최대 시간(초).
+# YouTube 스트림 URL 은 수 시간 뒤 만료되므로 여유 있게 잡고, 넘으면 다시 추출한다.
+STREAM_URL_MAX_AGE = 60 * 60
+
+# 추출 시각을 기록하는 키 (yt-dlp 가 쓰지 않는 이름)
+EXTRACTED_AT_KEY = '_extracted_at'
+
+
+def extract_track(query, custom_options=None):
+    """URL 또는 검색어를 추출해 재생 가능한 단일 곡 dict 를 반환합니다. (동기 함수)
+
+    결과에는 추출 시각이 기록되어, 큐에 넣어 두었다가 그대로 재생에 쓸 수 있다.
+    재생할 곡을 찾지 못하면 ValueError 를 던진다.
+    """
+    info = flatten_ytdl_info(
+        create_ytdl_instance(custom_options).extract_info(query, download=False)
+    )
+    if not info or not info.get('url'):
+        raise ValueError('재생할 수 있는 곡 정보를 찾지 못했습니다.')
+    info[EXTRACTED_AT_KEY] = time.time()
+    return info
+
+
+def is_track_fresh(track) -> bool:
+    """extract_track 결과의 스트림 URL 을 아직 재사용할 수 있는지 확인합니다."""
+    if not isinstance(track, dict) or not track.get('url'):
+        return False
+    extracted_at = track.get(EXTRACTED_AT_KEY)
+    return extracted_at is not None and time.time() - extracted_at < STREAM_URL_MAX_AGE

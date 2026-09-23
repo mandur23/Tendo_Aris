@@ -35,6 +35,7 @@ try:
 except ImportError:  # psutil이 없어도 대시보드는 동작해야 한다
     psutil = None
 
+from core.audio_mixer import stop_main
 from core.shutdown_handler import get_shutdown_event
 from utils import db_utils
 from utils import krx_api
@@ -60,6 +61,9 @@ logger = logging.getLogger(__name__)
 
 COOKIE_NAME = "aris_admin_session"
 SESSION_TTL_SECONDS = 12 * 3600
+# 같은 주소에서 이 시간 안에 이만큼 실패하면 잠시 로그인을 막는다.
+LOGIN_MAX_FAILURES = 10
+LOGIN_FAILURE_WINDOW_SECONDS = 10 * 60
 _SAFE_MODEL_NAME_RE = re.compile(r"^[\w.\-/:]+$")
 
 
@@ -68,8 +72,10 @@ def _safe_compare_password(provided: str, expected: str) -> bool:
     if not expected:
         return False
     try:
-        return hmac.compare_digest(provided, expected)
-    except (TypeError, ValueError):
+        # str 끼리 비교하면 한글 등 비ASCII 문자가 있을 때 TypeError 가 나서
+        # 올바른 비밀번호로도 로그인할 수 없었다. 바이트로 바꿔 비교한다.
+        return hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8"))
+    except (TypeError, ValueError, AttributeError):
         return False
 
 
@@ -604,8 +610,10 @@ function lookupStock(){if(_stockTimer){clearTimeout(_stockTimer);_stockTimer=nul
 scroller.addEventListener('scroll',()=>{const top=scroller.scrollTop+90;let cur=secs[0];for(const s of secs){if(s.offsetTop<=top)cur=s;}links.forEach(a=>a.classList.toggle('on',a.getAttribute('data-sec')===cur.id));});})();
 
 refreshAll();loadModels();loadLogs();
-setInterval(refreshAll,5000);
-setInterval(loadLogs,5000);   // 실시간 로그: 5초마다 자동 갱신
+// 실시간 상태·로그: 5초마다 자동 갱신. 탭이 가려져 있으면 봇에 불필요한 요청을 보내지 않는다.
+setInterval(()=>{if(!document.hidden)refreshAll();},5000);
+setInterval(()=>{if(!document.hidden)loadLogs();},5000);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden){refreshAll();loadLogs();}});
 </script>
 </body>
 </html>
@@ -619,6 +627,8 @@ class WebAdmin:
         self.bot = bot
         self.started_at = time.time()
         self._tokens: Dict[str, float] = {}
+        # 로그인 실패 기록: 접속 주소 -> 최근 실패 시각 목록 (무차별 대입 제한)
+        self._login_failures: Dict[str, List[float]] = {}
         self._runner: Optional[web.AppRunner] = None
         self._site: Optional[web.TCPSite] = None
         # 느린 점검(DB ping, Ollama, RVC 스캔)은 캐시해서 5초 자동 새로고침에도 부담이 없도록 한다.
@@ -707,15 +717,37 @@ class WebAdmin:
     async def page_login(self, request: web.Request) -> web.Response:
         return web.Response(text=LOGIN_HTML, content_type="text/html")
 
+    def _recent_login_failures(self, remote: str) -> List[float]:
+        now = time.time()
+        failures = [t for t in self._login_failures.get(remote, []) if now - t < LOGIN_FAILURE_WINDOW_SECONDS]
+        if failures:
+            self._login_failures[remote] = failures
+        else:
+            self._login_failures.pop(remote, None)
+        return failures
+
     async def do_login(self, request: web.Request) -> web.Response:
+        # 0.5초 지연만으로는 동시에 여러 요청을 보내는 대입 공격을 막지 못하므로
+        # 접속 주소별로 일정 시간 내 실패 횟수를 제한한다.
+        remote = request.remote or "unknown"
+        if len(self._recent_login_failures(remote)) >= LOGIN_MAX_FAILURES:
+            body = LOGIN_HTML.replace(
+                "<!--ERROR-->",
+                '<div class="error">로그인 시도가 너무 많습니다. 잠시 후 다시 시도해주세요.</div>',
+            )
+            return web.Response(text=body, content_type="text/html", status=429)
+
         form = await request.post()
         password = str(form.get("password", ""))
         if not WEB_ADMIN_PASSWORD or not _safe_compare_password(password, WEB_ADMIN_PASSWORD):
+            self._login_failures.setdefault(remote, []).append(time.time())
             await asyncio.sleep(0.5)  # 무차별 대입 완화
             body = LOGIN_HTML.replace(
                 "<!--ERROR-->", '<div class="error">비밀번호가 올바르지 않습니다.</div>'
             )
             return web.Response(text=body, content_type="text/html", status=401)
+
+        self._login_failures.pop(remote, None)
 
         # 만료된 토큰 정리 후 새 세션 발급
         now = time.time()
@@ -723,7 +755,8 @@ class WebAdmin:
         token = secrets.token_urlsafe(32)
         self._tokens[token] = now + SESSION_TTL_SECONDS
 
-        resp = web.HTTPFound("/")
+        # HTTPFound 를 반환(return)하는 방식은 aiohttp 에서 폐기 예정이라 일반 302 응답을 만든다.
+        resp = web.Response(status=302, headers={"Location": "/"})
         resp.set_cookie(
             COOKIE_NAME, token,
             max_age=SESSION_TTL_SECONDS, httponly=True, samesite="Lax", path="/",
@@ -1004,12 +1037,35 @@ class WebAdmin:
             return ""
         latest = candidates[0]
         try:
-            with open(latest, "r", encoding="utf-8", errors="replace") as f:
-                content = f.readlines()
+            content = self._read_tail_lines(latest, lines)
         except OSError as e:
             return f"로그 파일을 읽지 못했습니다: {e}"
-        header = f"# {latest.name} (마지막 {min(lines, len(content))}줄)\n"
-        return header + "".join(content[-lines:])
+        header = f"# {latest.name} (마지막 {len(content)}줄)\n"
+        return header + "".join(content)
+
+    @staticmethod
+    def _read_tail_lines(path, lines: int, block_size: int = 64 * 1024) -> List[str]:
+        """파일 끝에서부터 블록 단위로 읽어 마지막 lines 줄만 반환한다.
+
+        5초마다 호출되므로 하루치 로그 전체를 매번 읽지 않도록 필요한 만큼만 읽는다.
+        """
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            pos = f.tell()
+            data = b""
+            # 마지막 줄이 개행으로 끝나면 lines+1 개의 개행이 필요하다.
+            while pos > 0 and data.count(b"\n") <= lines:
+                read = min(block_size, pos)
+                pos -= read
+                f.seek(pos)
+                data = f.read(read) + data
+        # 텍스트 모드로 읽던 기존 동작과 같게 Windows 줄바꿈(\r\n)을 \n 으로 맞춘다.
+        text = data.decode("utf-8", errors="replace").replace("\r\n", "\n")
+        result = text.splitlines(keepends=True)
+        # 중간부터 읽었다면 첫 줄은 잘렸을 수 있으므로 버린다.
+        if pos > 0 and result:
+            result = result[1:]
+        return result[-lines:] if lines > 0 else []
 
     async def api_logs(self, request: web.Request) -> web.Response:
         try:
@@ -1226,7 +1282,8 @@ class WebAdmin:
         vc = getattr(guild, "voice_client", None) if guild else None
         if not vc or not (vc.is_playing() or vc.is_paused()):
             return web.json_response({"error": "재생 중인 곡이 없습니다."}, status=409)
-        vc.stop()  # player_loop 가 다음 곡으로 진행
+        # 음악만 끝내 player_loop 가 다음 곡으로 진행한다. (읽는 중인 TTS 는 끊지 않는다)
+        stop_main(vc)
         logger.info(f"웹 관리자에서 음악 스킵: guild={getattr(guild, 'id', '?')}")
         return web.json_response({"ok": True})
 

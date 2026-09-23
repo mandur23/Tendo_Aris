@@ -7,7 +7,7 @@ from discord.app_commands import command, describe, choices, Choice
 from discord.ui import Button, View, Select
 from datetime import datetime, timedelta
 from core.music_player import MusicPlayer
-from utils.ytdl_utils import create_ytdl_instance, ytdl_format_options
+from utils.ytdl_utils import extract_track
 from utils.file_utils import load_history, save_history, load_playlists, save_playlists, ensure_logs_dir, LOGS_DIR
 from utils.config import MAX_HISTORY_ITEMS, MAX_EXTRACT_RETRIES, COMMAND_MESSAGE_DELETE_DELAY, USE_MYSQL
 from utils.discord_utils import (
@@ -18,7 +18,8 @@ from core.watchdog import request_restart
 from utils.db_utils import (
     init_db_pool, close_db_pool, load_history_from_db, save_history_to_db,
     add_history_item_to_db, get_history_from_db, load_playlists_from_db,
-    save_playlists_to_db, get_playlist_from_db, save_playlist_to_db
+    save_playlists_to_db, get_playlist_from_db, save_playlist_to_db,
+    clear_guild_history_in_db
 )
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,26 @@ class Music(commands.Cog):
             await save_playlists_to_db(self.playlists)
         else:
             await asyncio.to_thread(save_playlists, self._playlists_snapshot())
+
+    async def save_playlist(self, user_id: str, name: str):
+        """플레이리스트 하나의 변경만 저장합니다.
+
+        MySQL 은 전체 사용자 데이터를 지우고 다시 쓰지 않도록 해당 플레이리스트만 교체한다.
+        (삭제된 플레이리스트는 빈 목록으로 저장되어 DB 행이 지워진다)
+        """
+        if USE_MYSQL:
+            urls = list(self.playlists.get(user_id, {}).get(name, []))
+            await save_playlist_to_db(int(user_id), name, urls)
+        else:
+            await asyncio.to_thread(save_playlists, self._playlists_snapshot())
+
+    async def clear_guild_history(self, guild_id_str: str):
+        """한 길드의 재생 기록을 비우고 저장합니다."""
+        self.history[guild_id_str] = []
+        if USE_MYSQL:
+            await clear_guild_history_in_db(int(guild_id_str))
+        else:
+            await asyncio.to_thread(save_history, self._history_snapshot())
 
     async def add_to_history(self, guild_id, source):
         """재생된 노래를 히스토리에 추가합니다. (오류 처리 개선)"""
@@ -163,20 +184,22 @@ class Music(commands.Cog):
                 if not await ensure_voice_client(ctx):
                     return
                 
-                await player.queue.put(url)
-                
+                # 제목 표시용으로 추출한 결과를 그대로 대기열에 넣어,
+                # 플레이어가 같은 곡을 다시 추출하지 않게 한다. 실패하면 URL 을 넣어 플레이어가 재시도한다.
+                track = None
                 title = url
                 try:
                     for retry in range(MAX_EXTRACT_RETRIES):
                         try:
-                            extract_options = ytdl_format_options.copy()
+                            extract_options = {}
                             if retry > 0:
                                 extract_options['socket_timeout'] = 30 + (retry * 10)
                                 await asyncio.sleep(retry * 2)
-                            
-                            ydl = create_ytdl_instance(extract_options)
-                            info = await self.bot.loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False))
-                            title = info.get('title', url)
+
+                            track = await self.bot.loop.run_in_executor(
+                                None, extract_track, url, extract_options
+                            )
+                            title = track.get('title', url)
                             break
                         except Exception as retry_error:
                             error_msg = handle_extract_error(retry_error, MAX_EXTRACT_RETRIES, retry)
@@ -188,8 +211,12 @@ class Music(commands.Cog):
                 except Exception as extract_error:
                     error_msg = handle_extract_error(extract_error, MAX_EXTRACT_RETRIES, MAX_EXTRACT_RETRIES)
                     title = error_msg or "❓ 알 수 없는 영상"
-                
-                if not player.is_playing:
+
+                # is_playing 은 대기열이 비어 있지 않아도 True 이므로 넣기 전에 판단한다.
+                was_playing = player.is_playing
+                await player.queue.put(track if track is not None else url)
+
+                if not was_playing:
                     await ctx.send(f"선생님, '{title}'을(를) 재생할게요!", delete_after=10)
                 else:
                     await ctx.send(f"선생님, '{title}'을(를) 대기열에 추가했어요! 지금 재생 중인 곡이 끝나면 재생할게요~", delete_after=10)
@@ -228,9 +255,8 @@ class Music(commands.Cog):
 
         player = self.get_player(ctx)
         if 0 <= volume <= 100:
-            player.volume = volume / 100
-            if ctx.voice_client.source and hasattr(ctx.voice_client.source, 'volume'):
-                ctx.voice_client.source.volume = player.volume
+            # 믹서 안의 음악 소스에만 적용한다 (TTS 볼륨은 그대로)
+            player.set_volume(volume / 100)
             await ctx.send(f"볼륨을 {volume}%로 맞췄어요! 이제 잘 들리나요?", delete_after=10)
         else:
             await ctx.send("앗, 볼륨은 0에서 100 사이로 해주세요~ 아리스의 귀가 아파요!", delete_after=12)
@@ -463,7 +489,7 @@ class Music(commands.Cog):
             return
         
         self.playlists[user_id][name].extend(new_urls)
-        await self.save_playlists()
+        await self.save_playlist(user_id, name)
         await ctx.send(f"선생님의 '{name}' 플레이리스트에 {len(new_urls)}개의 곡을 추가했어요! (중복 제외: {len(urls) - len(new_urls)}개)", delete_after=10)
         await delete_command_message(ctx)
 
@@ -526,7 +552,7 @@ class Music(commands.Cog):
             
             async def on_confirm(confirm_interaction):
                 del self.playlists[user_id][playlist_name]
-                await self.save_playlists()
+                await self.save_playlist(user_id, playlist_name)
                 await confirm_interaction.response.send_message(
                     f"선생님의 '{playlist_name}' 플레이리스트가 삭제되었어요!",
                     ephemeral=True,
@@ -639,7 +665,7 @@ class Music(commands.Cog):
 
                 async def on_confirm(confirm_interaction):
                     selected_playlist.pop(index)
-                    await self.save_playlists()
+                    await self.save_playlist(user_id, selected_playlist_name)
                     await confirm_interaction.response.send_message(
                         f"선생님의 '{selected_playlist_name}' 플레이리스트에서 '{removed_song}' 노래가 삭제되었어요!",
                         ephemeral=True,
@@ -821,8 +847,7 @@ class Music(commands.Cog):
             return
         
         async def on_confirm(interaction):
-            self.history[guild_id_str] = []
-            await self.save_history()
+            await self.clear_guild_history(guild_id_str)
             await interaction.response.send_message(
                 "선생님의 재생 기록을 모두 삭제했어요!",
                 ephemeral=True,

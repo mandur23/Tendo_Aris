@@ -38,21 +38,54 @@ _QUOTE_TTL = 2.0
 _quote_cache: dict[str, tuple[float, dict]] = {}
 _search_cache: dict[str, tuple[float, list[dict]]] = {}
 _SEARCH_TTL = 3600.0
+# 캐시 항목이 이 개수를 넘으면 만료된 항목을 정리한다 (사용자 입력별로 계속 쌓이는 것 방지)
+_CACHE_PRUNE_THRESHOLD = 256
+
+# 대시보드가 장중 수 초마다 시세를 폴링하므로 요청마다 TCP/TLS 연결을 새로 맺지 않도록
+# 세션을 재사용한다. 세션은 만든 이벤트 루프에 묶이므로 루프가 바뀌면 새로 만든다.
+_session: Optional[aiohttp.ClientSession] = None
+_session_loop: Optional[asyncio.AbstractEventLoop] = None
 
 
 class NaverStockError(RuntimeError):
     """네이버 금융 조회 실패."""
 
 
+def _get_session() -> aiohttp.ClientSession:
+    global _session, _session_loop
+    loop = asyncio.get_running_loop()
+    if _session is None or _session.closed or _session_loop is not loop:
+        _session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=_TIMEOUT_SECONDS),
+            headers=_HEADERS,
+        )
+        _session_loop = loop
+    return _session
+
+
+async def close_session() -> None:
+    """재사용 중인 HTTP 세션을 닫습니다. (봇 종료 시 호출)"""
+    global _session, _session_loop
+    session, _session, _session_loop = _session, None, None
+    if session is not None and not session.closed:
+        await session.close()
+
+
+def _prune_expired(cache: dict, ttl: float) -> None:
+    if len(cache) <= _CACHE_PRUNE_THRESHOLD:
+        return
+    now = time.monotonic()
+    for key in [k for k, (stamp, _) in cache.items() if now - stamp >= ttl]:
+        cache.pop(key, None)
+
+
 async def _get_json(url: str):
-    timeout = aiohttp.ClientTimeout(total=_TIMEOUT_SECONDS)
     try:
-        async with aiohttp.ClientSession(timeout=timeout, headers=_HEADERS) as s:
-            async with s.get(url) as r:
-                if r.status != 200:
-                    raise NaverStockError(f"네이버 응답 오류 (HTTP {r.status})")
-                return await r.json(content_type=None)
-    except aiohttp.ClientError as e:
+        async with _get_session().get(url) as r:
+            if r.status != 200:
+                raise NaverStockError(f"네이버 응답 오류 (HTTP {r.status})")
+            return await r.json(content_type=None)
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
         raise NaverStockError(f"네이버 연결 실패: {e}") from e
 
 
@@ -94,6 +127,7 @@ async def search(query: str) -> list[dict]:
             "market": it.get("typeCode"),
         })
     _search_cache[q] = (time.monotonic(), items)
+    _prune_expired(_search_cache, _SEARCH_TTL)
     return items
 
 
@@ -154,6 +188,7 @@ async def get_quote(code: str) -> dict:
         "source": "네이버 금융",
     }
     _quote_cache[code] = (time.monotonic(), result)
+    _prune_expired(_quote_cache, _QUOTE_TTL)
     return result
 
 

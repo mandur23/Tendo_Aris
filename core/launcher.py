@@ -17,6 +17,7 @@ from cogs.stock import Stock
 from GameSystem.YachtDiceGame import YachtDiceGame
 from GameSystem.BlackjackGame import BlackjackGame
 from utils.config import DISCORD_BOT_TOKEN, COMMAND_PREFIX
+from utils import naver_stock
 from utils.db_utils import close_db_pool
 from utils.file_utils import backup_data_dir
 
@@ -64,6 +65,12 @@ async def cleanup_bot(bot: FuzzyBot):
     
     # DB 연결 풀 명시적 종료
     await close_db_pool()
+
+    # 주식 시세 조회용으로 재사용하던 HTTP 세션 종료
+    try:
+        await naver_stock.close_session()
+    except Exception as e:
+        logger.debug(f"시세 HTTP 세션 종료 중 오류 (무시됨): {e}")
     
     # 봇 종료
     if not bot.is_closed():

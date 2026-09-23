@@ -99,7 +99,9 @@ def _rebuild_cache(signature: Tuple) -> None:
             logger.warning(f"지식 문서 읽기 실패({path.name}): {e}")
             continue
         for chunk in _split_chunks(text):
-            chunks.append({"file": path.name, "text": chunk})
+            # 검색마다 모든 청크를 다시 정규화하지 않도록 전처리 결과를 함께 캐시한다.
+            processed = rf_utils.default_process(chunk) if _RAPIDFUZZ_AVAILABLE else chunk
+            chunks.append({"file": path.name, "text": chunk, "processed": processed})
     _cache_signature = signature
     _cache_chunks = chunks
     logger.info(f"지식 문서 캐시 재구축: 파일 {len(signature)}개, 청크 {len(chunks)}개")
@@ -152,16 +154,21 @@ def search_knowledge(
     if not chunks:
         return []
 
+    processed_query = rf_utils.default_process(query)
+    if not processed_query:
+        return []
+
     scored: List[Dict] = []
     for chunk in chunks:
-        text = chunk["text"]
+        processed = chunk["processed"]
         # partial_ratio: 질의가 본문 일부와 일치하는 경우 / token_set_ratio: 단어 집합 유사도
+        # (질의·청크 모두 미리 default_process 로 정규화해 두었다)
         score = max(
-            fuzz.partial_ratio(query, text, processor=rf_utils.default_process),
-            fuzz.token_set_ratio(query, text, processor=rf_utils.default_process),
+            fuzz.partial_ratio(processed_query, processed),
+            fuzz.token_set_ratio(processed_query, processed),
         )
         if score >= min_score:
-            scored.append({"file": chunk["file"], "text": text, "score": round(score, 1)})
+            scored.append({"file": chunk["file"], "text": chunk["text"], "score": round(score, 1)})
 
     scored.sort(key=lambda item: item["score"], reverse=True)
     return scored[:max(1, top_k)]

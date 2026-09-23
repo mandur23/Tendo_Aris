@@ -15,8 +15,10 @@ from urllib import error, request
 
 from utils.config import (
     LOCAL_AI_BASE_URL,
+    LOCAL_AI_KEEP_ALIVE,
     LOCAL_AI_MAX_CONCURRENCY,
     LOCAL_AI_MODEL,
+    LOCAL_AI_NUM_CTX,
     LOCAL_AI_TEMPERATURE,
     LOCAL_AI_TIMEOUT_SECONDS,
 )
@@ -153,22 +155,24 @@ def ollama_chat_sync(
         payload_messages.append({"role": "system", "content": system})
     payload_messages.extend(messages)
 
+    # num_ctx 는 호출부가 지정하지 않아도 항상 대화 기능과 같은 값을 보낸다.
+    # Ollama 는 같은 모델이라도 num_ctx 가 바뀌면 모델을 재로드하므로,
+    # 대화·웹검색 판단·TRPG 호출이 서로 다른 값을 쓰면 요청마다 수 초씩 지연된다.
     options: Dict = {
         "temperature": LOCAL_AI_TEMPERATURE if temperature is None else temperature,
+        "num_ctx": LOCAL_AI_NUM_CTX if num_ctx is None else num_ctx,
     }
     if num_predict is not None:
         options["num_predict"] = num_predict
-    if num_ctx is not None:
-        options["num_ctx"] = num_ctx
 
     payload = {
         "model": model or LOCAL_AI_MODEL,
         "messages": payload_messages,
         "stream": False,
         "options": options,
+        # 지정하지 않으면 Ollama 기본값(5분) 후 모델이 내려가 다음 요청이 느려진다.
+        "keep_alive": LOCAL_AI_KEEP_ALIVE if keep_alive is None else keep_alive,
     }
-    if keep_alive is not None:
-        payload["keep_alive"] = keep_alive
     if format_json:
         payload["format"] = "json"
 

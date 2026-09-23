@@ -33,8 +33,10 @@ class FuzzyBot(commands.Bot):
     async def get_context(self, message, *, cls=commands.Context):
         ctx = await super().get_context(message, cls=cls)
 
-        if ctx.command is None:
-            command_name = ctx.invoked_with or ""
+        # get_context 는 모든 메시지(일반 채팅 포함)에 대해 호출된다.
+        # 접두사로 시작한 명령어 시도일 때만 유사 명령어를 찾아, 채팅마다 퍼지 매칭하지 않는다.
+        if ctx.command is None and ctx.prefix is not None and ctx.invoked_with:
+            command_name = ctx.invoked_with
             names = self._get_cmd_names()
             
             # 매우 높은 유사도(95점 이상)에서만 자동 실행

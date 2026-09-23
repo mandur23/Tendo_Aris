@@ -1,5 +1,6 @@
 """TTS (Text-to-Speech) 유틸리티"""
 import os
+import time
 import logging
 from pathlib import Path
 from gtts import gTTS
@@ -67,6 +68,7 @@ def text_to_speech(
         생성된 음성 파일 경로
     """
     # gTTS 사용
+    temp_path = None
     try:
         # 임시 파일 생성
         temp_file = tempfile.NamedTemporaryFile(
@@ -86,6 +88,9 @@ def text_to_speech(
         
     except Exception as e:
         logger.error(f"TTS 생성 중 오류: {e}")
+        # 합성 전에 만들어 둔 빈 임시 파일이 쌓이지 않도록 지운다.
+        if temp_path is not None:
+            cleanup_tts_file(temp_path)
         raise
 
 
@@ -98,3 +103,26 @@ def cleanup_tts_file(file_path: Path):
     except Exception as e:
         logger.warning(f"TTS 파일 삭제 실패: {file_path.name}: {e}")
 
+
+def sweep_stale_tts_files(max_age_seconds: float = 3600) -> int:
+    """TTS 임시 폴더에서 오래된 파일을 지웁니다. 지운 개수를 반환합니다.
+
+    비정상 종료나 외부 라이브러리(RVC 등)가 남긴 파일이 계속 쌓이지 않도록 시작 시 호출한다.
+    재생 중일 수 있는 최근 파일은 건드리지 않는다.
+    """
+    now = time.time()
+    removed = 0
+    try:
+        entries = list(TTS_TEMP_DIR.iterdir())
+    except OSError:
+        return 0
+    for path in entries:
+        try:
+            if path.is_file() and now - path.stat().st_mtime > max_age_seconds:
+                path.unlink()
+                removed += 1
+        except OSError:
+            pass
+    if removed:
+        logger.info(f"오래된 TTS 임시 파일 {removed}개를 정리했습니다.")
+    return removed
