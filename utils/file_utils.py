@@ -1,7 +1,10 @@
+import asyncio
 import datetime
+import hashlib
 import json
 import logging
 import os
+import shutil
 import tempfile
 import threading
 import zipfile
@@ -31,6 +34,23 @@ TRPG_SAVES_FILE = str(DATA_DIR / 'trpg_saves.json')
 TRPG_PARTY_SAVES_FILE = str(DATA_DIR / 'trpg_party_saves.json')
 TRPG_WORLD_SAVES_FILE = str(DATA_DIR / 'trpg_world_saves.json')
 LOGS_DIR = Path('logs')
+
+
+async def run_storage_io(func, *args):
+    """취소된 호출도 쓰기 스레드가 끝날 때까지 기다려 저장 락을 유지합니다."""
+    task = asyncio.create_task(asyncio.to_thread(func, *args))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        # 종료 처리 등에서 cancel()이 다시 호출돼도 쓰기 스레드는 계속 돈다.
+        # shield를 유지한 채 완료를 회수해야 다음 저장이 먼저 실행되지 않는다.
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+        task.result()
+        raise
 
 
 def atomic_write_json(path, data):
@@ -70,7 +90,7 @@ def atomic_write_json(path, data):
 
 
 def _load_json_file(path, label, *, allow_empty_on_corrupt: bool = False):
-    """JSON 파일을 로드합니다. 손상 시 타임스탬프 백업으로 보존합니다.
+    """JSON 파일을 로드합니다. 손상 시 원본과 내용별 백업을 보존합니다.
 
     allow_empty_on_corrupt 가 False 이면 JsonStorageError 를 발생시켜
     손상 직후 단일 키만 담긴 dict 로 전체 파일을 덮어쓰는 것을 막습니다.
@@ -84,13 +104,17 @@ def _load_json_file(path, label, *, allow_empty_on_corrupt: bool = False):
     except FileNotFoundError:
         return {}
     except json.JSONDecodeError as e:
-        stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-        backup_path = f"{path}.corrupt_{stamp}"
+        fingerprint = hashlib.sha256(content.encode('utf-8')).hexdigest()[:16]
+        backup_path = f"{path}.corrupt_{fingerprint}"
         try:
-            os.replace(path, backup_path)
+            # 원본을 남겨 후속 저장과 재시작 후에도 손상을 감지한다.
+            # 이동하면 다음 요청은 파일이 없는 것으로 보고 빈 저장소를 만든다.
+            # 반복 자동저장/조회가 같은 손상 파일의 사본을 무한히 만들지 않게 한다.
+            if not os.path.exists(backup_path):
+                shutil.copy2(path, backup_path)
             logger.error(f"{label} 파일이 손상되어 {backup_path} 로 보존했습니다: {e}")
         except OSError as move_err:
-            logger.error(f"{label} 파일이 손상되었고 백업 이동도 실패했습니다 ({move_err}): {e}")
+            logger.error(f"{label} 파일이 손상되었고 백업 복사도 실패했습니다 ({move_err}): {e}")
         if allow_empty_on_corrupt:
             return {}
         raise JsonStorageError(
@@ -127,14 +151,12 @@ def load_history():
 
 
 def save_history(history):
-    """히스토리를 저장합니다. (MySQL 사용 시 비동기 함수 사용 필요)"""
-    if USE_MYSQL:
-        logger.warning("MySQL이 활성화되어 있습니다. save_history_to_db()를 사용하세요.")
-        return
+    """히스토리를 JSON에 저장합니다. 저장 방식은 호출자가 선택합니다."""
     try:
         atomic_write_json(HISTORY_FILE, history)
     except Exception as e:
         logger.error(f"히스토리를 저장하는 중 오류가 발생했습니다: {e}")
+        raise
 
 
 def load_playlists_from_json_file():
@@ -151,14 +173,12 @@ def load_playlists():
 
 
 def save_playlists(playlists):
-    """플레이리스트를 저장합니다. (MySQL 사용 시 비동기 함수 사용 필요)"""
-    if USE_MYSQL:
-        logger.warning("MySQL이 활성화되어 있습니다. save_playlists_to_db()를 사용하세요.")
-        return
+    """플레이리스트를 JSON에 저장합니다. 저장 방식은 호출자가 선택합니다."""
     try:
         atomic_write_json(PLAYLISTS_FILE, playlists)
     except Exception as e:
         logger.error(f"플레이리스트를 저장하는 중 오류가 발생했습니다: {e}")
+        raise
 
 
 def load_tts_settings():
@@ -172,6 +192,7 @@ def save_tts_settings(tts_settings):
         atomic_write_json(TTS_SETTINGS_FILE, tts_settings)
     except Exception as e:
         logger.error(f"TTS 설정을 저장하는 중 오류가 발생했습니다: {e}")
+        raise
 
 
 def atomic_write_text(path, content: str, *, encoding: str = "utf-8") -> None:
@@ -213,6 +234,7 @@ def save_trpg_saves(saves):
         atomic_write_json(TRPG_SAVES_FILE, saves)
     except Exception as e:
         logger.error(f"TRPG 세이브를 저장하는 중 오류가 발생했습니다: {e}")
+        raise
 
 
 def load_trpg_party_saves():
@@ -226,6 +248,7 @@ def save_trpg_party_saves(saves):
         atomic_write_json(TRPG_PARTY_SAVES_FILE, saves)
     except Exception as e:
         logger.error(f"파티 TRPG 세이브를 저장하는 중 오류가 발생했습니다: {e}")
+        raise
 
 
 def load_trpg_world_saves():
@@ -239,6 +262,7 @@ def save_trpg_world_saves(saves):
         atomic_write_json(TRPG_WORLD_SAVES_FILE, saves)
     except Exception as e:
         logger.error(f"자유 모험 세이브를 저장하는 중 오류가 발생했습니다: {e}")
+        raise
 
 
 # --------------------------------------------------------- 세이브 갱신 (락 직렬화)

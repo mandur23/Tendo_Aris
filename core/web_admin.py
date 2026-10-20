@@ -792,17 +792,19 @@ class WebAdmin:
         return value
 
     async def _db_status(self) -> dict:
+        music_cog = self._music_cog()
+        use_mysql = getattr(music_cog, "use_mysql", USE_MYSQL)
         info = {
-            "use_mysql": USE_MYSQL,
-            "backend": "MySQL" if USE_MYSQL else "JSON 파일",
-            "host": MYSQL_HOST if USE_MYSQL else None,
-            "port": MYSQL_PORT if USE_MYSQL else None,
-            "database": MYSQL_DATABASE if USE_MYSQL else None,
+            "use_mysql": use_mysql,
+            "backend": "MySQL" if use_mysql else "JSON 파일",
+            "host": MYSQL_HOST if use_mysql else None,
+            "port": MYSQL_PORT if use_mysql else None,
+            "database": MYSQL_DATABASE if use_mysql else None,
             "connected": None,
             "pool": None,
             "error": None,
         }
-        if not USE_MYSQL:
+        if not use_mysql:
             return info
 
         pool = db_utils._pool

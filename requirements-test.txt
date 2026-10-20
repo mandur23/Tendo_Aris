@@ -1,0 +1,9 @@
+# CI/로컬 테스트용. 모델과 실제 음성 연결에 필요한 무거운 패키지는 제외한다.
+discord.py>=2.7.0
+python-dotenv>=1.0.0
+rapidfuzz>=3.0.0
+pytest>=8.0.0
+aiomysql>=0.2.0
+gtts>=2.5.0
+yt-dlp>=2026.3.17
+async-timeout>=4.0.0

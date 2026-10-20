@@ -410,6 +410,14 @@ class ConfirmView(AuthorLockedView):
                 await self.on_confirm_callback(interaction)
             except Exception as e:
                 logger.error(f"확인 콜백 실행 중 오류: {e}")
+                error_message = "작업을 완료하지 못했어요. 저장소 상태를 확인한 뒤 다시 시도해주세요."
+                try:
+                    if interaction.response.is_done():
+                        await interaction.followup.send(error_message, ephemeral=True)
+                    else:
+                        await interaction.response.send_message(error_message, ephemeral=True)
+                except discord.HTTPException:
+                    logger.debug("확인 콜백 오류 안내 전송 실패", exc_info=True)
 
         await self._disable_buttons(interaction)
         self.stop()

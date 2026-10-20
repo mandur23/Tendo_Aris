@@ -68,3 +68,5 @@ backups/
 
 # pytest
 .pytest_cache/
+.cache/
+.claude/

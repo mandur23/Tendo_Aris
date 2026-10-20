@@ -40,6 +40,7 @@ async def init_db_pool():
             await create_tables()
         except Exception as e:
             logger.error(f"MySQL 연결 풀 초기화 실패: {e}")
+            await close_db_pool()
             raise
 
 
@@ -177,7 +178,7 @@ async def load_history_from_db() -> Dict[str, List[Dict[str, Any]]]:
                 return history
     except Exception as e:
         logger.error(f"히스토리 로드 중 오류: {e}")
-        return {}
+        raise
 
 
 async def save_history_to_db(history: Dict[str, List[Dict[str, Any]]]):
@@ -230,6 +231,7 @@ async def save_history_to_db(history: Dict[str, List[Dict[str, Any]]]):
                 raise
     except Exception as e:
         logger.error(f"히스토리 저장 중 오류: {e}")
+        raise
 
 
 async def add_history_item_to_db(guild_id: int, title: str, url: str, duration: int, played_at: Optional[datetime] = None):
@@ -272,6 +274,7 @@ async def add_history_item_to_db(guild_id: int, title: str, url: str, duration: 
                 await conn.commit()
     except Exception as e:
         logger.error(f"히스토리 항목 추가 중 오류: {e}")
+        raise
 
 
 async def clear_guild_history_in_db(guild_id: int):
@@ -289,6 +292,7 @@ async def clear_guild_history_in_db(guild_id: int):
                 )
     except Exception as e:
         logger.error(f"히스토리 삭제 중 오류: {e}")
+        raise
 
 
 async def get_history_from_db(guild_id: int, limit: int = 100) -> List[Dict[str, Any]]:
@@ -322,7 +326,7 @@ async def get_history_from_db(guild_id: int, limit: int = 100) -> List[Dict[str,
                 return result
     except Exception as e:
         logger.error(f"히스토리 조회 중 오류: {e}")
-        return []
+        raise
 
 
 # ========== 플레이리스트 관련 함수 ==========
@@ -361,7 +365,7 @@ async def load_playlists_from_db() -> Dict[str, Dict[str, List[str]]]:
                 return playlists
     except Exception as e:
         logger.error(f"플레이리스트 로드 중 오류: {e}")
-        return {}
+        raise
 
 
 async def save_playlists_to_db(playlists: Dict[str, Dict[str, List[str]]]):
@@ -408,6 +412,7 @@ async def save_playlists_to_db(playlists: Dict[str, Dict[str, List[str]]]):
                 raise
     except Exception as e:
         logger.error(f"플레이리스트 저장 중 오류: {e}")
+        raise
 
 
 async def get_playlist_from_db(guild_id: int, playlist_id: str) -> List[str]:
@@ -430,7 +435,7 @@ async def get_playlist_from_db(guild_id: int, playlist_id: str) -> List[str]:
                 return [row[0] for row in rows]
     except Exception as e:
         logger.error(f"플레이리스트 조회 중 오류: {e}")
-        return []
+        raise
 
 
 async def save_playlist_to_db(guild_id: int, playlist_id: str, urls: List[str]):
@@ -464,4 +469,5 @@ async def save_playlist_to_db(guild_id: int, playlist_id: str, urls: List[str]):
                 raise
     except Exception as e:
         logger.error(f"플레이리스트 저장 중 오류: {e}")
+        raise
 

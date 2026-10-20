@@ -8,7 +8,7 @@ from discord.ui import Button, View, Select
 from datetime import datetime, timedelta
 from core.music_player import MusicPlayer
 from utils.ytdl_utils import extract_track
-from utils.file_utils import load_history, save_history, load_playlists, save_playlists, ensure_logs_dir, LOGS_DIR
+from utils.file_utils import load_history, save_history, load_playlists, save_playlists, ensure_logs_dir, LOGS_DIR, run_storage_io
 from utils.config import MAX_HISTORY_ITEMS, MAX_EXTRACT_RETRIES, COMMAND_MESSAGE_DELETE_DELAY, USE_MYSQL
 from utils.discord_utils import (
     delete_command_message, ensure_voice_client, safe_send, handle_extract_error,
@@ -29,6 +29,9 @@ class Music(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.players = {}
+        self.use_mysql = USE_MYSQL
+        # 스냅샷 생성부터 쓰기 완료까지 직렬화해 오래된 저장이 덮어쓰지 못하게 한다.
+        self._storage_lock = asyncio.Lock()
         self.playlists = {} if USE_MYSQL else load_playlists()
         self.history = {} if USE_MYSQL else load_history()
         ensure_logs_dir()
@@ -61,18 +64,19 @@ class Music(commands.Cog):
 
     async def save_history(self):
         """히스토리를 저장합니다."""
-        if USE_MYSQL:
-            await save_history_to_db(self.history)
-        else:
-            # 파일 쓰기는 스레드로 넘겨 이벤트 루프를 막지 않는다.
-            await asyncio.to_thread(save_history, self._history_snapshot())
+        async with self._storage_lock:
+            if self.use_mysql:
+                await save_history_to_db(self._history_snapshot())
+            else:
+                await run_storage_io(save_history, self._history_snapshot())
 
     async def save_playlists(self):
         """플레이리스트를 저장합니다."""
-        if USE_MYSQL:
-            await save_playlists_to_db(self.playlists)
-        else:
-            await asyncio.to_thread(save_playlists, self._playlists_snapshot())
+        async with self._storage_lock:
+            if self.use_mysql:
+                await save_playlists_to_db(self._playlists_snapshot())
+            else:
+                await run_storage_io(save_playlists, self._playlists_snapshot())
 
     async def save_playlist(self, user_id: str, name: str):
         """플레이리스트 하나의 변경만 저장합니다.
@@ -80,67 +84,60 @@ class Music(commands.Cog):
         MySQL 은 전체 사용자 데이터를 지우고 다시 쓰지 않도록 해당 플레이리스트만 교체한다.
         (삭제된 플레이리스트는 빈 목록으로 저장되어 DB 행이 지워진다)
         """
-        if USE_MYSQL:
-            urls = list(self.playlists.get(user_id, {}).get(name, []))
-            await save_playlist_to_db(int(user_id), name, urls)
-        else:
-            await asyncio.to_thread(save_playlists, self._playlists_snapshot())
+        async with self._storage_lock:
+            if self.use_mysql:
+                urls = list(self.playlists.get(user_id, {}).get(name, []))
+                await save_playlist_to_db(int(user_id), name, urls)
+            else:
+                await run_storage_io(save_playlists, self._playlists_snapshot())
 
     async def clear_guild_history(self, guild_id_str: str):
         """한 길드의 재생 기록을 비우고 저장합니다."""
-        self.history[guild_id_str] = []
-        if USE_MYSQL:
-            await clear_guild_history_in_db(int(guild_id_str))
-        else:
-            await asyncio.to_thread(save_history, self._history_snapshot())
+        async with self._storage_lock:
+            if self.use_mysql:
+                await clear_guild_history_in_db(int(guild_id_str))
+                self.history[guild_id_str] = []
+            else:
+                snapshot = self._history_snapshot()
+                snapshot[guild_id_str] = []
+                await run_storage_io(save_history, snapshot)
+                self.history[guild_id_str] = []
+
+    async def update_playlist(self, user_id: str, name: str, update):
+        """복사본에 변경을 적용하고 저장이 성공하면 메모리에 반영합니다."""
+        async with self._storage_lock:
+            snapshot = self._playlists_snapshot()
+            owner_playlists = snapshot.setdefault(user_id, {})
+            result = update(owner_playlists)
+            if self.use_mysql:
+                await save_playlist_to_db(int(user_id), name, list(owner_playlists.get(name, [])))
+            else:
+                await run_storage_io(save_playlists, snapshot)
+            self.playlists = snapshot
+            return result
 
     async def add_to_history(self, guild_id, source):
-        """재생된 노래를 히스토리에 추가합니다. (오류 처리 개선)"""
-        try:
-            if USE_MYSQL:
-                # MySQL 사용 시 직접 DB에 추가
-                title = source.get('title', '알 수 없는 제목')
-                url = source.get('webpage_url', source.get('url', ''))
-                duration = source.get('duration', 0)
-                await add_history_item_to_db(guild_id, title, url, duration)
-                
-                # 메모리 캐시 업데이트
-                guild_id_str = str(guild_id)
-                if guild_id_str not in self.history:
-                    self.history[guild_id_str] = []
-                
-                history_item = {
-                    'title': title,
-                    'url': url,
-                    'duration': duration,
-                    'played_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                }
-                
-                self.history[guild_id_str].insert(0, history_item)
-                if len(self.history[guild_id_str]) > MAX_HISTORY_ITEMS:
-                    self.history[guild_id_str] = self.history[guild_id_str][:MAX_HISTORY_ITEMS]
+        """저장이 성공한 뒤 재생 기록 캐시를 갱신합니다."""
+        async with self._storage_lock:
+            history_item = {
+                'title': source.get('title', '알 수 없는 제목'),
+                'url': source.get('webpage_url', source.get('url', '')),
+                'duration': source.get('duration', 0),
+                'played_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            }
+            snapshot = self._history_snapshot()
+            guild_id_str = str(guild_id)
+            items = snapshot.setdefault(guild_id_str, [])
+            items.insert(0, history_item)
+            snapshot[guild_id_str] = items[:MAX_HISTORY_ITEMS]
+            if self.use_mysql:
+                await add_history_item_to_db(
+                    guild_id, history_item['title'], history_item['url'],
+                    history_item['duration'],
+                )
             else:
-                # JSON 파일 사용
-                guild_id_str = str(guild_id)
-                if guild_id_str not in self.history:
-                    self.history[guild_id_str] = []
-                
-                history_item = {
-                    'title': source.get('title', '알 수 없는 제목'),
-                    'url': source.get('webpage_url', source.get('url', '')),
-                    'duration': source.get('duration', 0),
-                    'played_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                }
-                
-                self.history[guild_id_str].insert(0, history_item)
-                
-                if len(self.history[guild_id_str]) > MAX_HISTORY_ITEMS:
-                    self.history[guild_id_str] = self.history[guild_id_str][:MAX_HISTORY_ITEMS]
-
-                # 곡이 바뀔 때마다 호출되므로, 파일 쓰기로 이벤트 루프를 막지 않는다.
-                await asyncio.to_thread(save_history, self._history_snapshot())
-        except Exception as e:
-            logger.error(f"히스토리 저장 중 오류: {e}")
+                await run_storage_io(save_history, snapshot)
+            self.history = snapshot
 
     async def cleanup(self, guild):
         try:
@@ -473,24 +470,20 @@ class Music(commands.Cog):
             return
 
         user_id = str(ctx.author.id)
-        if user_id not in self.playlists:
-            self.playlists[user_id] = {}
+        def add_urls(playlists):
+            playlist = playlists.setdefault(name, [])
+            existing_urls = set(playlist)
+            new_urls = [url for url in dict.fromkeys(urls) if url not in existing_urls]
+            playlist.extend(new_urls)
+            return len(new_urls)
 
-        if name not in self.playlists[user_id]:
-            self.playlists[user_id][name] = []
-
-        # 중복 URL 제거
-        existing_urls = set(self.playlists[user_id][name])
-        new_urls = [url for url in urls if url not in existing_urls]
-        
-        if not new_urls:
+        added = await self.update_playlist(user_id, name, add_urls)
+        if not added:
             await ctx.send(f"선생님, '{name}' 플레이리스트에 이미 모든 URL이 추가되어 있어요!", delete_after=10)
             await delete_command_message(ctx)
             return
         
-        self.playlists[user_id][name].extend(new_urls)
-        await self.save_playlist(user_id, name)
-        await ctx.send(f"선생님의 '{name}' 플레이리스트에 {len(new_urls)}개의 곡을 추가했어요! (중복 제외: {len(urls) - len(new_urls)}개)", delete_after=10)
+        await ctx.send(f"선생님의 '{name}' 플레이리스트에 {added}개의 곡을 추가했어요! (중복 제외: {len(urls) - added}개)", delete_after=10)
         await delete_command_message(ctx)
 
     @commands.command(name='플레이리스트재생', aliases=['플래이리스트재생', 'vmffpdlfltmxmwotod'])
@@ -551,8 +544,9 @@ class Music(commands.Cog):
             playlist_name = _pl_names[int(select.values[0])]
             
             async def on_confirm(confirm_interaction):
-                del self.playlists[user_id][playlist_name]
-                await self.save_playlist(user_id, playlist_name)
+                await self.update_playlist(
+                    user_id, playlist_name, lambda playlists: playlists.pop(playlist_name),
+                )
                 await confirm_interaction.response.send_message(
                     f"선생님의 '{playlist_name}' 플레이리스트가 삭제되었어요!",
                     ephemeral=True,
@@ -664,8 +658,10 @@ class Music(commands.Cog):
                 removed_song = selected_playlist[index]
 
                 async def on_confirm(confirm_interaction):
-                    selected_playlist.pop(index)
-                    await self.save_playlist(user_id, selected_playlist_name)
+                    await self.update_playlist(
+                        user_id, selected_playlist_name,
+                        lambda playlists: playlists[selected_playlist_name].remove(removed_song),
+                    )
                     await confirm_interaction.response.send_message(
                         f"선생님의 '{selected_playlist_name}' 플레이리스트에서 '{removed_song}' 노래가 삭제되었어요!",
                         ephemeral=True,
@@ -1325,7 +1321,7 @@ class Music(commands.Cog):
         await delete_command_message(ctx)
 
     @commands.command(name='재시작', aliases=['restart'])
-    @commands.has_permissions(administrator=True)
+    @commands.is_owner()
     async def restart_bot(self, ctx):
         """봇을 재시작합니다."""
         async def on_confirm(interaction):
@@ -1363,7 +1359,7 @@ class Music(commands.Cog):
         await delete_command_message(ctx)
 
     @commands.command(name='종료봇', aliases=['exit'])
-    @commands.has_permissions(administrator=True)
+    @commands.is_owner()
     async def exit_bot(self, ctx):
         """봇을 종료합니다."""
         async def on_confirm(interaction):
@@ -1520,7 +1516,7 @@ class Music(commands.Cog):
 
     async def _load_data(self):
         """히스토리/플레이리스트를 로드합니다. (MySQL 우선, 실패 시 JSON)"""
-        if not USE_MYSQL:
+        if not self.use_mysql:
             return
 
         try:
@@ -1559,6 +1555,7 @@ class Music(commands.Cog):
         except Exception as e:
             logger.error(f"MySQL 초기화 실패: {e}")
             logger.warning("JSON 파일 사용 모드로 전환합니다.")
+            self.use_mysql = False
             # MySQL 실패 시 JSON 파일에서 로드
             from utils.file_utils import load_history_from_json_file, load_playlists_from_json_file
             self.history = load_history_from_json_file()

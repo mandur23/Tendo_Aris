@@ -88,6 +88,8 @@ class FuzzyBot(commands.Bot):
             await _safe_error_send(f"선생님, 명령어에 필요한 인자가 빠졌어요: `{error.param.name}`")
         elif isinstance(error, commands.BadArgument):
             await _safe_error_send(f"선생님, 입력하신 인자가 올바르지 않아요: {str(error)[:100]}")
+        elif isinstance(error, commands.NotOwner):
+            await _safe_error_send("선생님, 이 명령어는 봇 소유자만 사용할 수 있어요.")
         elif isinstance(error, commands.MissingPermissions):
             await _safe_error_send("앗, 죄송해요 선생님. 이 명령어는 특별한 권한이 필요해요.")
         elif isinstance(error, commands.CommandOnCooldown):

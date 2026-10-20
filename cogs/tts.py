@@ -7,7 +7,7 @@ import discord
 from discord.ext import commands
 from pathlib import Path
 from utils.tts_utils import text_to_speech, cleanup_tts_file, sweep_stale_tts_files, VOICE_MODELS
-from utils.file_utils import load_tts_settings, save_tts_settings
+from utils.file_utils import load_tts_settings, save_tts_settings, run_storage_io
 from utils.config import COMMAND_MESSAGE_DELETE_DELAY, FFMPEG_PATH
 from utils.discord_utils import safe_defer, safe_typing
 from core.audio_mixer import play_overlay, release_held_main
@@ -47,10 +47,8 @@ class TTS(commands.Cog):
         self._playback_locks = {}
         # 음성 연결 경합 방지 락 (guild_id -> asyncio.Lock)
         self._voice_connect_locks = {}
-        # 설정 저장 직렬화용 락과, 백그라운드 저장 태스크 참조 보관
-        # (참조를 들고 있지 않으면 태스크가 GC 될 수 있다)
+        # 설정 변경부터 저장 완료까지 직렬화한다.
         self._settings_write_lock = asyncio.Lock()
-        self._settings_save_tasks: set = set()
         # 재생 중 다음 메시지 미리 합성: guild_id -> (대기열 항목, 합성 태스크)
         self._presynth = {}
         # 대기열 처리 태스크 참조 보관 (GC 방지)
@@ -91,38 +89,6 @@ class TTS(commands.Cog):
             self._voice_connect_locks[guild_id] = asyncio.Lock()
         return self._voice_connect_locks[guild_id]
 
-    def save_settings(self):
-        """TTS 설정을 저장합니다.
-
-        설정 변경은 명령 처리(코루틴) 중에 자주 일어나므로, 파일 쓰기는
-        백그라운드 스레드로 넘겨 이벤트 루프를 막지 않는다.
-        - 쓰는 도중 설정이 바뀌어도 안전하도록 스냅샷을 넘긴다.
-        - 저장 순서가 뒤바뀌지 않도록 락으로 직렬화한다.
-        이벤트 루프 밖(테스트 등)에서 호출되면 기존처럼 동기 저장한다.
-        """
-        # 손상된 설정(값이 dict 가 아닌 경우)에서도 기존처럼 저장되도록 방어적으로 복사한다.
-        snapshot = {
-            key: dict(value) if isinstance(value, dict) else value
-            for key, value in self.tts_settings.items()
-        }
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            save_tts_settings(snapshot)
-            return
-
-        task = loop.create_task(self._save_settings_async(snapshot))
-        self._settings_save_tasks.add(task)
-        task.add_done_callback(self._settings_save_tasks.discard)
-
-    async def _save_settings_async(self, snapshot: dict) -> None:
-        """스냅샷을 스레드에서 저장한다. 실패해도 명령 처리를 막지 않는다."""
-        async with self._settings_write_lock:
-            try:
-                await asyncio.to_thread(save_tts_settings, snapshot)
-            except Exception as e:
-                logger.error(f"TTS 설정 저장 실패: {e}")
-
     def get_user_settings(self, user_id: int, guild_id: int):
         """사용자의 TTS 설정을 가져옵니다."""
         user_key = f"{guild_id}_{user_id}"
@@ -140,18 +106,19 @@ class TTS(commands.Cog):
             }
         return self.tts_settings[user_key]
 
-    def set_user_settings(self, user_id: int, guild_id: int, **kwargs):
-        """사용자의 TTS 설정을 업데이트합니다."""
-        user_key = f"{guild_id}_{user_id}"
-        if user_key not in self.tts_settings:
-            self.tts_settings[user_key] = {
-                'enabled': False,
-                'lang': 'ko',
-                'voice_model': '기본',
-                'slow': False
+    async def set_user_settings(self, user_id: int, guild_id: int, **kwargs):
+        """저장 완료 후 설정을 적용합니다. 실패는 명령/버튼 호출자에게 전파합니다."""
+        async with self._settings_write_lock:
+            snapshot = {
+                key: dict(value) if isinstance(value, dict) else value
+                for key, value in self.tts_settings.items()
             }
-        self.tts_settings[user_key].update(kwargs)
-        self.save_settings()
+            user_key = f"{guild_id}_{user_id}"
+            snapshot.setdefault(user_key, {
+                'enabled': False, 'lang': 'ko', 'voice_model': '기본', 'slow': False,
+            }).update(kwargs)
+            await run_storage_io(save_tts_settings, snapshot)
+            self.tts_settings = snapshot
 
     def is_user_active(self, user_id: int, guild_id: int) -> bool:
         """사용자의 TTS 자동 읽기가 활성화되어 있는지 확인합니다."""
@@ -627,7 +594,7 @@ class TTS(commands.Cog):
             current_settings = self.get_user_settings(ctx.author.id, ctx.guild.id)
             new_state = not current_settings.get('enabled', False)
             
-            self.set_user_settings(
+            await self.set_user_settings(
                 ctx.author.id,
                 ctx.guild.id,
                 enabled=new_state
@@ -735,7 +702,7 @@ class TTS(commands.Cog):
             new_use_rvc = (selected_engine == 'rvc')
             new_use_supertonic = (selected_engine == 'supertonic')
             
-            self.set_user_settings(
+            await self.set_user_settings(
                 ctx.author.id,
                 ctx.guild.id,
                 use_rvc=new_use_rvc,
@@ -779,7 +746,7 @@ class TTS(commands.Cog):
                         return
                     
                     selected_model = rvc_model_select.values[0]
-                    self.set_user_settings(
+                    await self.set_user_settings(
                         ctx.author.id,
                         ctx.guild.id,
                         rvc_model=selected_model
@@ -827,7 +794,7 @@ class TTS(commands.Cog):
                         return
                     
                     selected_voice = voice_select.values[0]
-                    self.set_user_settings(
+                    await self.set_user_settings(
                         ctx.author.id,
                         ctx.guild.id,
                         supertonic_voice=selected_voice
@@ -883,7 +850,7 @@ class TTS(commands.Cog):
                         return
                     
                     selected_model = model_select.values[0]
-                    self.set_user_settings(
+                    await self.set_user_settings(
                         ctx.author.id,
                         ctx.guild.id,
                         voice_model=selected_model
@@ -935,7 +902,7 @@ class TTS(commands.Cog):
                     return
                 
                 selected_voice = voice_select.values[0]
-                self.set_user_settings(
+                await self.set_user_settings(
                     ctx.author.id,
                     ctx.guild.id,
                     supertonic_voice=selected_voice
@@ -981,7 +948,7 @@ class TTS(commands.Cog):
                     return
                 
                 selected_model = rvc_model_select.values[0]
-                self.set_user_settings(
+                await self.set_user_settings(
                     ctx.author.id,
                     ctx.guild.id,
                     rvc_model=selected_model
@@ -1026,7 +993,7 @@ class TTS(commands.Cog):
                     return
                 
                 selected_model = model_select.values[0]
-                self.set_user_settings(
+                await self.set_user_settings(
                     ctx.author.id,
                     ctx.guild.id,
                     voice_model=selected_model
@@ -1065,7 +1032,7 @@ class TTS(commands.Cog):
                 # 언어 변경 시 기본 모델로 설정
                 if selected_lang in VOICE_MODELS:
                     default_model = list(VOICE_MODELS[selected_lang].keys())[0]
-                    self.set_user_settings(
+                    await self.set_user_settings(
                         ctx.author.id,
                         ctx.guild.id,
                         lang=selected_lang,
@@ -1091,7 +1058,7 @@ class TTS(commands.Cog):
         settings = self.get_user_settings(ctx.author.id, ctx.guild.id)
         new_slow = not settings.get('slow', False)
         
-        self.set_user_settings(
+        await self.set_user_settings(
             ctx.author.id,
             ctx.guild.id,
             slow=new_slow
@@ -1155,6 +1122,7 @@ class TTS(commands.Cog):
 
 
     @commands.command(name='ttsrvc모델추가', aliases=['ttsrvcadd', 'rvc모델추가'])
+    @commands.is_owner()
     async def tts_add_rvc_model(self, ctx, model_name: str, model_path: str, index_path: str = None, *, display_name: str = None):
         """
         RVC 모델을 추가합니다.
@@ -1170,12 +1138,6 @@ class TTS(commands.Cog):
             await self.delete_command_message(ctx)
             return
 
-        can_manage = getattr(ctx.author, "guild_permissions", None) and ctx.author.guild_permissions.manage_guild
-        if not can_manage:
-            await ctx.send("선생님, RVC 모델 추가는 서버 관리 권한이 필요해요!", delete_after=12)
-            await self.delete_command_message(ctx)
-            return
-        
         # 모델 이름 중복 확인
         existing = get_rvc_model(model_name)
         if existing:
@@ -1224,6 +1186,7 @@ class TTS(commands.Cog):
         await self.delete_command_message(ctx)
 
     @commands.command(name='ttsrvc모델삭제', aliases=['ttsrvcremove', 'rvc모델삭제'])
+    @commands.is_owner()
     async def tts_remove_rvc_model(self, ctx, model_name: str):
         """RVC 모델을 삭제합니다."""
         existing = get_rvc_model(model_name)
@@ -1312,7 +1275,7 @@ class TTS(commands.Cog):
             return
         
         # RVC 사용 설정
-        self.set_user_settings(
+        await self.set_user_settings(
             ctx.author.id,
             ctx.guild.id,
             use_rvc=True,
@@ -1325,7 +1288,7 @@ class TTS(commands.Cog):
     @commands.command(name='ttsrvc끄기', aliases=['ttsrvcdisable', 'rvc끄기'])
     async def tts_disable_rvc(self, ctx):
         """RVC 사용을 중지합니다."""
-        self.set_user_settings(
+        await self.set_user_settings(
             ctx.author.id,
             ctx.guild.id,
             use_rvc=False,
@@ -1336,6 +1299,7 @@ class TTS(commands.Cog):
         await self.delete_command_message(ctx)
 
     @commands.command(name='ttsrvc자동등록', aliases=['ttsrvcscan', 'rvc자동등록'])
+    @commands.is_owner()
     async def tts_auto_register_rvc(self, ctx):
         """models 폴더를 스캔하여 RVC 모델을 자동으로 등록합니다."""
         await ctx.send("선생님, models 폴더를 스캔하고 있어요...", delete_after=5)
